@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import socket
 import threading
@@ -782,8 +783,25 @@ class _CreateV2FanoutJA3H2Client(_SourcePoolJA3H2Client):
         )
 
     @staticmethod
-    def _fanout_slots(pool: Sequence[ConnectionSlot]) -> list[ConnectionSlot]:
-        """每个出口 source 只保留一条连接用于并发对冲。"""
+    def _fanout_same_source_enabled() -> bool:
+        """是否允许同一个出口 IP 内多条连接并发发同一请求（默认关闭）。
+
+        关闭（默认）：每个出口只发 1 路。同一个出口上并发多个「完全相同的 createV2」
+        （同 ctoken / 同 cookie / 同 header）收益很小，更容易被判重复提交。
+
+        打开（BTB_FANOUT_SAME_SOURCE=1）：恢复上游「每个 IP 连 3 条、每秒各打一次」的
+        原始策略（见 #963/#1028/#1058 的实测：单 IP 约 3 req/s 是上限）。需要 A/B 时用它。
+        """
+
+        value = str(os.environ.get("BTB_FANOUT_SAME_SOURCE", "0")).strip().lower()
+        return value in {"1", "true", "on", "yes"}
+
+    @classmethod
+    def _fanout_slots(cls, pool: Sequence[ConnectionSlot]) -> list[ConnectionSlot]:
+        """默认每个出口 source 只保留一条连接用于并发对冲。"""
+
+        if cls._fanout_same_source_enabled():
+            return list(pool)
 
         seen: set[str] = set()
         selected: list[ConnectionSlot] = []

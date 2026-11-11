@@ -39,6 +39,15 @@
 原来单代理/直连会把**同一个请求（同 ctoken、同 header、同 cookie）**在毫秒内从同一个 IP
 并发发 3 次 —— 比串行更像"机器并发提交"，只会更快触发风控。多出口时仍然对冲（这才是它的用途）。
 
+> ⚠️ **这一条与上游的实测策略有冲突，注意 A/B**：上游 `#963`（cc004 实测）给出的结论是
+> 「接口访问速度不能超过 3req/s，因此 429 时等 333ms，或'连发 3 请求 + 固定等 1s'」，
+> `#1058`/`#1065` 的「代理池并发」正是照这个做的（每 IP 3 条连接、默认并行数 3，作者标注"不建议修改"）。
+> 也就是说：**单 IP 3 并发是人家调过的**，我这边改成 1 路是因为那 3 个请求内容完全相同（同 ctoken），
+> 判重风险 > 对冲收益。要不要恢复上游行为，用环境变量切：
+>
+> - `BTB_FANOUT_SAME_SOURCE=0`（默认）：每出口 1 路，靠"更快的间隔"提高命中（见下面 6.x 的速率预算）
+> - `BTB_FANOUT_SAME_SOURCE=1`：恢复上游"每 IP 3 条连接并发"，适合你确认多 IP + 低延迟代理时对比
+
 ---
 
 ## 2. 请求重复度
@@ -122,6 +131,7 @@ batch 内仍按旧价继续打的问题（新价在下一次 payload 里自动�
 | `EXCEPTION_BACKOFF_*` / `RATE_LIMIT_BACKOFF_*` | `util/Constant.py` | 0.2/3.0、0.3/2.4 | 异常与限速退避 |
 | `DEFAULT_RATE_LIMIT_DELAY_MS` | `util/Constant.py` | 800（原 300） | HTTP 429 的基础退避 |
 | `BTB_RANDOM_URL_PATH` | 环境变量 | 1 | `0` = 关闭 createV2 路径随机编码 |
+| `BTB_FANOUT_SAME_SOURCE` | 环境变量 | 0 | `1` = 恢复上游"同一出口 3 条连接并发"策略 |
 
 界面里原有的参数语义没变，仍然可以照常调：`--interval`（每次失败后的间隔）、
 `--create-retry-limit`、`--create-request-batch-size`、`--h2-connections-per-source-ip`。
