@@ -330,6 +330,7 @@ def buy_stream(config: BuyConfig):
         *,
         attempt: int | None = None,
         risk_control: bool = False,
+        risk_streak: int = 1,
     ):
         def replenish_proxy_pool():
             if not str(config.proxy_api_url or "").strip():
@@ -371,6 +372,7 @@ def buy_stream(config: BuyConfig):
             config.notifier_config,
             replenish_proxy_pool=replenish_proxy_pool,
             risk_control=risk_control,
+            risk_streak=risk_streak,
         )
         attempt_total = (
             effective_retry_limit if attempt is not None else state.attempt_total
@@ -433,6 +435,8 @@ def buy_stream(config: BuyConfig):
         status_code = getattr(response, "status_code", None)
         is_risk_control = status_code == 412 or "412 风控" in summary
         if is_risk_control:
+            nonlocal risk_streak
+            risk_streak += 1
             yield emit(
                 "proxy",
                 f"{prefix}触发 412 风控",
@@ -452,6 +456,7 @@ def buy_stream(config: BuyConfig):
                 f"{prefix} 412 风控",
                 attempt=attempt,
                 risk_control=True,
+                risk_streak=risk_streak,
             )
             return True
         yield emit(
@@ -512,6 +517,8 @@ def buy_stream(config: BuyConfig):
     # 连击计数：异常分支与限速分支的短指数退避用，收到正常响应即清零。
     fail_streak = 0
     rate_limit_streak = 0
+    # 连续 412 次数：单线路时决定"快速重试"还是"指数退避 + 提示换网络/换账号"。
+    risk_streak = 0
     is_hot_project = bool(tickets_info.get("is_hot_project", False))
     # use_local_token = bool(config.use_local_token)
     browser_window_state = generate_browser_window_state()
@@ -745,6 +752,7 @@ def buy_stream(config: BuyConfig):
                         ret = create_response.json()
                         proxy_backoff.reset()
                         fail_streak = 0
+                        risk_streak = 0
                         err = _extract_errno(ret)
                         retry_outcome.set_response(err, ret)
                         _request.handle_100001(err)

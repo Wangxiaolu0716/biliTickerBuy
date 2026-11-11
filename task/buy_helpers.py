@@ -21,6 +21,9 @@ from util.Constant import (
     RATE_LIMIT_BACKOFF_BASE_SECONDS,
     RATE_LIMIT_BACKOFF_MAX_SECONDS,
     RETRY_JITTER_RATIO,
+    RISK_CONTROL_BACKOFF_BASE_SECONDS,
+    RISK_CONTROL_BACKOFF_MAX_SECONDS,
+    RISK_CONTROL_QUICK_RETRIES,
     RISK_CONTROL_SHORT_DELAY_SECONDS,
     SINGLE_LINE_MAX_BACKOFF_SECONDS,
     WARMUP_AT_SECONDS,
@@ -469,6 +472,7 @@ def handle_proxy_failure(
     replenish_proxy_pool: Callable[[], tuple[bool, str | None]] | None = None,
     *,
     risk_control: bool = False,
+    risk_streak: int = 1,
 ) -> tuple[str | None, int | None]:
     """处理一次线路失败/风控命中，返回 (提示消息, 需要等待的整秒数或 None)。
 
@@ -480,14 +484,36 @@ def handle_proxy_failure(
     """
 
     if risk_control:
-        risk_message = f"{reason}：被风控，降速重试"
+        # 有多条线路时，换出口是唯一能真正解开 412 的动作（IP 级风控）。
         if _request.available_proxy_count() > 1 and _request.switch_proxy():
             proxy_backoff.reset()
             return (
-                f"{risk_message}，已切换线路到 {_request.current_proxy_display()}",
+                f"{reason}：被风控（IP 级），已切换线路到 "
+                f"{_request.current_proxy_display()}",
                 None,
             )
-        return risk_message, max(1, int(RISK_CONTROL_SHORT_DELAY_SECONDS))
+
+        # 单线路：前几次快速重试（可能只是瞬时抖动），之后按指数退避。
+        # 依据 discussions#390 / issues#963：412 通常是 10~15 分钟的 IP 封禁，
+        # 请求越猛封越久——所以不能 1 秒一次硬撞，也不该一撞就睡 30~240 秒。
+        if risk_streak <= max(1, int(RISK_CONTROL_QUICK_RETRIES)):
+            return (
+                f"{reason}：被风控，{int(RISK_CONTROL_SHORT_DELAY_SECONDS)} 秒后重试"
+                f"（若持续 412，请切换网络/代理，或换账号）",
+                max(1, int(RISK_CONTROL_SHORT_DELAY_SECONDS)),
+            )
+
+        step = risk_streak - max(1, int(RISK_CONTROL_QUICK_RETRIES)) - 1
+        delay_seconds = min(
+            int(RISK_CONTROL_BACKOFF_BASE_SECONDS) * (2 ** min(max(0, step), 4)),
+            int(RISK_CONTROL_BACKOFF_MAX_SECONDS),
+        )
+        return (
+            f"{reason}：连续被风控（第 {risk_streak} 次），退避 {delay_seconds} 秒。"
+            "IP 可能已被封 10~15 分钟，建议切换网络/代理或换账号；"
+            "若换出口后仍 412，说明是账号级风控，需换账号",
+            delay_seconds,
+        )
 
     previous_proxy = _request.current_proxy_display()
     cooled = _request.mark_current_proxy_failure(reason)

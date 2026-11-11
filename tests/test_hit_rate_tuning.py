@@ -23,6 +23,9 @@ from util.Constant import (
     EXCEPTION_BACKOFF_MAX_SECONDS,
     RATE_LIMIT_BACKOFF_MAX_SECONDS,
     RETRY_JITTER_RATIO,
+    RISK_CONTROL_BACKOFF_BASE_SECONDS,
+    RISK_CONTROL_BACKOFF_MAX_SECONDS,
+    RISK_CONTROL_QUICK_RETRIES,
     RISK_CONTROL_SHORT_DELAY_SECONDS,
     SINGLE_LINE_MAX_BACKOFF_SECONDS,
 )
@@ -147,7 +150,8 @@ def test_risk_control_does_not_cool_down_single_line():
     assert request.failure_marks == 0
     assert request.switch_calls == 0
     assert delay == max(1, int(RISK_CONTROL_SHORT_DELAY_SECONDS))
-    assert "降速" in (message or "")
+    assert "风控" in (message or "")
+    assert "切换网络" in (message or "")
 
 
 def test_risk_control_switches_line_when_available():
@@ -203,3 +207,57 @@ def test_fanout_slots_dedupe_by_source():
     multi = [_Slot("proxy-1"), _Slot("proxy-2"), _Slot("proxy-2"), _Slot("proxy-3")]
     assert len(_CreateV2FanoutJA3H2Client._fanout_slots(multi)) == 3
     assert _CreateV2FanoutJA3H2Client._fanout_slots([]) == []
+
+
+def test_risk_control_single_line_escalates_after_quick_retries():
+    request = _FakeRequest(["none"], available=1)
+    backoff = _FakeBackoff()
+
+    fast = []
+    for streak in range(1, max(1, int(RISK_CONTROL_QUICK_RETRIES)) + 1):
+        _, delay = handle_proxy_failure(
+            request,
+            "412 风控",
+            backoff,
+            _FakeNotifierConfig(),
+            risk_control=True,
+            risk_streak=streak,
+        )
+        fast.append(delay)
+    assert fast == [max(1, int(RISK_CONTROL_SHORT_DELAY_SECONDS))] * len(fast)
+
+    # 超过快速重试次数后进入指数退避（30s 起），并封顶
+    _, delay = handle_proxy_failure(
+        request,
+        "412 风控",
+        backoff,
+        _FakeNotifierConfig(),
+        risk_control=True,
+        risk_streak=max(1, int(RISK_CONTROL_QUICK_RETRIES)) + 1,
+    )
+    assert delay == int(RISK_CONTROL_BACKOFF_BASE_SECONDS)
+
+    _, capped = handle_proxy_failure(
+        request,
+        "412 风控",
+        backoff,
+        _FakeNotifierConfig(),
+        risk_control=True,
+        risk_streak=20,
+    )
+    assert capped == int(RISK_CONTROL_BACKOFF_MAX_SECONDS)
+
+
+def test_risk_control_multi_line_never_waits():
+    request = _FakeRequest(["p1", "p2"], available=2)
+    backoff = _FakeBackoff()
+    for streak in (1, 5, 20):
+        _, delay = handle_proxy_failure(
+            request,
+            "412 风控",
+            backoff,
+            _FakeNotifierConfig(),
+            risk_control=True,
+            risk_streak=streak,
+        )
+        assert delay is None

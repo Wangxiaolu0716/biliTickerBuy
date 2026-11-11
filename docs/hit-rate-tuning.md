@@ -83,20 +83,29 @@ batch 内仍按旧价继续打的问题（新价在下一次 payload 里自动�
 
 ## 3. 被限流后的恢复策略（本次最关键的改动）
 
-### 3.1 412 不再冷却线路
+### 3.1 412 的处理：不再一撞就冷却 180s，也不无脑每秒硬撞
 
-`task/buy_helpers.handle_proxy_failure(..., risk_control=True)`，`task/buy.py` 的 412 分支传入。
+**先纠正一个容易踩的坑**：412 的真实语义不是"你打太快，慢点就好"，而是
+**该 IP（少数情况是该账号）被限流/封禁，社区实测常见 10~15 分钟，请求越猛封得越久**
+（见 `discussions#390`「关于抢票时出现的常见问题和个人经验总结」与 `issues#963`）。
+所以正确反应是"**换出口 / 换账号**"，而不是原地降速，也不是硬打。
 
 改之前：`_request` 对 412 不抛异常 → 主循环 `.json()` 抛 `JSONDecodeError` → 命中 `"412 风控"` →
-`mark_current_proxy_failure` → **阈值 2 次就把当前线路冷却 180 秒** → 单线路换不了线、
+`mark_current_proxy_failure` → 阈值 2 次就把当前线路冷却 180 秒 → 单线路换不了线、
 `has_available_proxy()` 为假 → `ProxyBackoff` 给 **30 秒**（之后 60/120/240）。
-结果是直连用户开票 2 秒内吃两次 412，接下来 30 秒一个请求都不发。
+单线路用户开票 2 秒内吃两次 412，接下来 30 秒一个请求都不发。
 
-改之后（`risk_control=True`）：
+改之后（`risk_control=True`，分级处理）：
 
-* 不把当前线路记为失败；
-* 有备用线路（`available_proxy_count() > 1`）才换线，换完 `proxy_backoff.reset()`；
-* 单线路原地降速，等待 `RISK_CONTROL_SHORT_DELAY_SECONDS = 1` 秒。
+| 情况 | 行为 |
+| --- | --- |
+| 有多条可用线路 | **立刻换线**，不记线路失败，无额外等待 |
+| 单线路，第 1~2 次 412 | 等 `RISK_CONTROL_SHORT_DELAY_SECONDS`（1s）重试 —— 也可能是瞬时抖动 |
+| 单线路，第 3 次起 | 指数退避 30 → 60 → 120 → 180s 封顶，**并在日志里明确提示"IP 可能已被封 10~15 分钟，请切换网络/代理；若换出口仍 412 说明是账号级风控，需换账号"** |
+| 收到正常 JSON 响应 | `risk_streak` 清零（说明没被封） |
+
+这样既避免了"一次就睡 30s"的过度惩罚，也避免了我最初想写的"1 秒一次硬撞 15 分钟"
+——按社区经验那样只会把封禁拖长。
 
 412 的判定同时改成看 `response.status_code == 412`，不再依赖 `"status=412"` / `"412 风控"`
 两次字符串匹配（原来改一个空格就静默失效）。
@@ -126,7 +135,9 @@ batch 内仍按旧价继续打的问题（新价在下一次 payload 里自动�
 | --- | --- | --- | --- |
 | `WARMUP_AT_SECONDS` | `util/Constant.py` | 30.0 | 预热提前多少秒 |
 | `RETRY_JITTER_RATIO` | `util/Constant.py` | 0.25 | 等待抖动比例 |
-| `RISK_CONTROL_SHORT_DELAY_SECONDS` | `util/Constant.py` | 1 | 412 后的降速等待 |
+| `RISK_CONTROL_SHORT_DELAY_SECONDS` | `util/Constant.py` | 1 | 412 首次快速重试的等待 |
+| `RISK_CONTROL_QUICK_RETRIES` | `util/Constant.py` | 2 | 412 连续几次后转为指数退避 |
+| `RISK_CONTROL_BACKOFF_BASE/MAX` | `util/Constant.py` | 30 / 180 | 单线路 412 的指数退避与封顶（秒） |
 | `SINGLE_LINE_MAX_BACKOFF_SECONDS` | `util/Constant.py` | 3 | 单线路失败最长退避 |
 | `EXCEPTION_BACKOFF_*` / `RATE_LIMIT_BACKOFF_*` | `util/Constant.py` | 0.2/3.0、0.3/2.4 | 异常与限速退避 |
 | `DEFAULT_RATE_LIMIT_DELAY_MS` | `util/Constant.py` | 800（原 300） | HTTP 429 的基础退避 |
@@ -140,6 +151,35 @@ batch 内仍按旧价继续打的问题（新价在下一次 payload 里自动�
 页面校验，未命中再补一次 4s 的 POST，判据还是整页 HTML 子串搜"立即购票"，误判一次就等到超时（默认 60s）。
 
 ---
+
+## 4.5 这些数字不是拍脑袋：上游 issue/discussion 里的实测结论
+
+改动前先查了仓库的 issue / PR / discussion，下面几条直接决定参数怎么设：
+
+- **`issues#963`（cc004，实测）**：单 IP「接口访问速度不能超过 **3 req/s**」；429 时应等
+  **333ms**，或用「连发 3 请求 + 固定等 1s」的策略。→ 这就是默认 `rate_limit_delay_ms`
+  与「代理池并发默认 3 条连接」（`#1058` / `#1065`，作者标注"不建议修改"）的由来。
+- **`discussions#390`（社区 BW2026 版 FAQ）**：
+  * 会员购有 **1 秒盾**：同账号同场次 1 秒内只能有 1 次有效请求，**与 IP 无关**；
+  * 所以请求间隔低于 1000ms **不会提高有效请求数**，只是提高"卡在 1s 窗口边界上"的概率，
+    因此推荐用 1000 **的整除数**：200 / **250** / 500ms；
+  * 社区参数：抢票间隔 **250ms** + 429 延迟 **300ms**，单 IP 单账号单程序实测不 412；
+  * 412 一般封 **10 分钟**左右，越猛越久；账号级 412 只能等；
+  * 「**一 IP 一账号一程序**」；429 太多时才让一个账号用多个 IP（突破 429）；
+  * 抢未开售场次会触发 `100041` → 账号被封会员购 5 分钟起，**别提前开抢**。
+- **`issues#685`**：同一 IP 多开多个配置，立刻 412 且 24 小时才解开。
+- **`pr#1028`（作者实测）**：8 个 IP → 单账号平均 1.4s 摸一次内层；16 IP → 1.1s。
+
+把上面的结论套进本项目的参数：
+
+| 你的场景 | 建议 |
+| --- | --- |
+| 单账号 + 单 IP（直连） | `--interval 250`（1000 的整除数）+ `rate_limit_delay_ms 300`；先按 1000 跑一场确认不 412 再降 |
+| 多账号 + 每号一个独享 IP | 每号一套 interval 250~1000ms；`--create-request-proxy-strategy local_fanout`；`h2_connections_per_source_ip` 保持 3 |
+| 想要"多发几次提高抽中率" | 别在同 IP 上并发；加 IP 比提高间隔更有效（1s 盾是账号级，加 IP 只解决 412/429） |
+
+> 因此我前面那份专项报告里"前 3 秒降到 250~400ms 提高 QPS"的说法要**收窄**成：
+> **250ms 是社区实测的稳妥下限，且必须是 1000 的整除数；再快没有收益（1s 盾），只会加速 412。**
 
 ## 5. 怎么验证改动有没有用
 

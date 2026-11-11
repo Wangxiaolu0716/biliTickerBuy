@@ -44,9 +44,15 @@ H2_LIMITS = {
 # 请求间隔抖动比例：固定周期的请求串是最容易被识别的机器特征之一。
 RETRY_JITTER_RATIO = 0.25
 
-# 命中 412（风控）后的短退避秒数。
-# 412 的含义是"打太快了"，正确反应是降速重试；把唯一线路冷却 30~240 秒等于放弃本场。
+# 命中 412（风控）后的处理策略。
+# 社区实测（discussions#390 / issues#963）语义是：412 = 该 IP（或账号）被限流/封禁，
+# 常见 10~15 分钟；请求越猛封越久。所以既不能"1 秒一次硬撞 15 分钟"，也不能"一撞就睡 30~240 秒"：
+# 先快速重试 RISK_CONTROL_QUICK_RETRIES 次（可能只是瞬时抖动），仍 412 再按指数退避到上限，
+# 并在消息里提示"换网络/换代理/换账号"——这才是能真正解开 412 的动作。
 RISK_CONTROL_SHORT_DELAY_SECONDS = 1
+RISK_CONTROL_QUICK_RETRIES = 2
+RISK_CONTROL_BACKOFF_BASE_SECONDS = 30
+RISK_CONTROL_BACKOFF_MAX_SECONDS = 180
 
 # 只有一条线路（直连/单代理）时，线路级失败的最长退避秒数。
 # 原逻辑在这种情况下会走 ProxyBackoff 的 30/60/120/240s，开票窗口里等于出局。
