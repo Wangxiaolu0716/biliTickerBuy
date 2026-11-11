@@ -459,22 +459,63 @@ class _SourcePoolJA3H2Client(AbstractH2Client):
         key = (host, port)
         with self._lock:
             pool = self._pools.get(key)
-            if pool:
-                return pool
+            if pool is None:
+                pool = []
+                self._pools[key] = pool
 
-            pool = []
+            # 按"每个 source 应有多少条"补齐，而不是有池就直接返回。
+            # 原实现里 discard 掉的连接永远不补，几次 412/异常之后就退化成单连接串行，
+            # 开票窗口内的并发度会莫名其妙掉到 1/N。
+            counts: dict[str, int] = {}
+            for slot in pool:
+                counts[slot.source.ip] = counts.get(slot.source.ip, 0) + 1
             for source in self._available_sources:
-                for _ in range(self._connections_per_source_ip):
+                missing = self._connections_per_source_ip - counts.get(source.ip, 0)
+                for _ in range(max(0, missing)):
                     pool.append(
                         ConnectionSlot(
                             source=source,
                             connection=self._build_connection(host, port, source),
                         )
                     )
+
             if not pool:
                 raise httpx.ConnectError(f"no available H2 connections for {host}")
-            self._pools[key] = pool
             return pool
+
+    def warm_connections(self, url: str) -> int:
+        """把连接池里所有连接都握手点亮，返回成功建连数。
+
+        ``prewarm_h2_connection`` 只发一个 HEAD，而 ``_slot_chooser`` 是随机挑一条，
+        因此开票前池里通常只有一条连接是热的；fanout 的其余几路会在 T0 现场做
+        TCP + TLS1.3 握手，第一秒的对冲等于不存在。
+        """
+
+        parsed = urllib.parse.urlsplit(url)
+        host = parsed.hostname or self._healthcheck_host
+        port = parsed.port or 443
+        try:
+            pool = list(self._ensure_pool(host, port))
+        except Exception:  # noqa: BLE001 - 预热失败不影响正式流程
+            return 0
+
+        warmed = 0
+        for slot in pool:
+            try:
+                with slot.lock:
+                    slot.connection.connect()
+                warmed += 1
+            except Exception:  # noqa: BLE001 - 单条连接预热失败不影响其它连接
+                continue
+        if warmed:
+            logger.info(
+                "H2 warm_connections host={}:{} slots={}/{} warmed",
+                host,
+                port,
+                warmed,
+                len(pool),
+            )
+        return warmed
 
     def _discard_slot(
         self,
@@ -512,7 +553,13 @@ class _SourcePoolJA3H2Client(AbstractH2Client):
                 exc.__class__.__name__,
                 exc,
             )
-        slot.close()
+        # 关闭必须在 slot 锁内：否则可能把另一个线程正在读同一条连接的请求打断，
+        # 那个请求随后报异常、又被当成"线路失败"再丢一条，形成雪崩。
+        try:
+            with slot.lock:
+                slot.close()
+        except Exception:  # noqa: BLE001 - 关闭失败无所谓，连接已经不在池里
+            pass
 
     def _request(
         self,
@@ -651,6 +698,13 @@ class _CreateV2FanoutJA3H2Client(_SourcePoolJA3H2Client):
                 request=request,
             )
 
+        # 只有一条出口 IP 时不做并发对冲：同账号、同 ctoken、同 cookie 的几个完全相同的
+        # createV2 在毫秒内从同一个 IP 打出去，只会比串行更像"机器并发提交"，
+        # 反而更容易被判定为重复/异常并发。多出口时才按 source 各发一路。
+        pool = self._fanout_slots(pool)
+        if len(pool) <= 1:
+            return super()._request(method, url, headers=headers, content=content)
+
         executor = ThreadPoolExecutor(
             max_workers=len(pool),
             thread_name_prefix="btb-createv2-fanout",
@@ -727,6 +781,20 @@ class _CreateV2FanoutJA3H2Client(_SourcePoolJA3H2Client):
             and "createv2" in decoded_path.lower()
         )
 
+    @staticmethod
+    def _fanout_slots(pool: Sequence[ConnectionSlot]) -> list[ConnectionSlot]:
+        """每个出口 source 只保留一条连接用于并发对冲。"""
+
+        seen: set[str] = set()
+        selected: list[ConnectionSlot] = []
+        for slot in pool:
+            key = slot.source.ip
+            if key in seen:
+                continue
+            seen.add(key)
+            selected.append(slot)
+        return selected
+
     def _send_fanout_request(
         self,
         slot: ConnectionSlot,
@@ -773,13 +841,8 @@ class _CreateV2FanoutJA3H2Client(_SourcePoolJA3H2Client):
                 reason="fanout_exception",
                 exc=outcome.exc,
             )
-        elif outcome.response.status_code == 412:
-            self._discard_slot(
-                host,
-                port,
-                outcome.slot,
-                reason="http_412",
-            )
+        # 412 是账号/IP 级别的风控响应，不代表这条连接坏了：
+        # 原来在这里丢弃连接，一场 412 风暴会把连接池打到 0 再重建，T0 期间全在握手。
 
 
 class ProxyPoolCreateV2FanoutJA3H2Client(_CreateV2FanoutJA3H2Client):
@@ -838,6 +901,11 @@ class ProxyPoolCreateV2FanoutJA3H2Client(_CreateV2FanoutJA3H2Client):
         pool = list(self._ensure_pool(host, port))
         if not pool:
             raise self._to_httpx_error(method, url, None)
+
+        # 同 _CreateV2FanoutJA3H2Client：只在多个出口 source 之间对冲，同一出口不并发重复提交。
+        pool = self._fanout_slots(pool)
+        if len(pool) <= 1:
+            return super()._request(method, url, headers=headers, content=content)
 
         executor = ThreadPoolExecutor(
             max_workers=len(pool),

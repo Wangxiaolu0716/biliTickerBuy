@@ -178,7 +178,9 @@ def test_runtime_uses_default_h2_connections_per_source_ip():
     assert config.h2_connections_per_source_ip == H2CLIENT_CONNECTIONS_PER_SOURCE_IP
 
 
-def test_h2_client_constructor_uses_abstract_client_interface():
+def test_h2_client_constructor_uses_abstract_client_interface(monkeypatch):
+    # createV2 路径默认会随机百分号编码（BTB_RANDOM_URL_PATH），这里关掉以便断言原始 URL。
+    monkeypatch.setenv("BTB_RANDOM_URL_PATH", "0")
     FakeH2Client.instances = []
     request = BiliRequest(
         cookies=[{"name": "SESSDATA", "value": "abc"}],
@@ -276,7 +278,12 @@ def test_proxy_pool_fanout_builds_one_create_connection_per_proxy():
     FakeH2Connection.instances = []
     FakeH2Connection.post_bodies_by_proxy = {}
     FakeH2Connection.post_errors_by_proxy = {}
-    FakeH2Connection.post_responses_by_proxy = {}
+    # 两个出口都返回 900001（"下单过快"）：fanout 会继续等全部结果，
+    # 从而稳定验证"每个出口各发一路"，而不是被第一路成功提前 cancel 掉。
+    FakeH2Connection.post_responses_by_proxy = {
+        "http://127.0.0.1:18080": [(200, b'{"errno":900001}')],
+        "socks5://127.0.0.1:19090": [(200, b'{"errno":900001}')],
+    }
     client = ProxyPoolCreateV2FanoutJA3H2Client(
         proxy_pool=[
             "http://127.0.0.1:18080",
@@ -329,7 +336,9 @@ def test_proxy_pool_fanout_can_use_direct_single_source():
         and instance.calls[-1][1]
         == "https://show.bilibili.com/api/ticket/order/createV2"
     ]
-    assert len(business_connections) == 2
+    # 行为变更：单一出口不再并发重复提交（同 ctoken/同 IP 上并发多个 createV2
+    # 更像"机器并发提交"，反而更容易被风控判重）；多出口时才按 source 各发一路。
+    assert len(business_connections) == 1
     assert {instance.source_ip for instance in business_connections} == {None}
     assert {instance.proxy_url for instance in business_connections} == {None}
 
@@ -357,7 +366,8 @@ def test_proxy_pool_fanout_detects_percent_encoded_create_v2_path():
         for instance in FakeH2Connection.instances
         if instance.calls and instance.calls[-1][1] == encoded_create_url
     ]
-    assert len(business_connections) == 2
+    # 单出口 → 只发 1 路（见上一条注释）；这里同时验证百分号编码的路径仍被识别为 createV2。
+    assert len(business_connections) == 1
 
 
 def test_proxy_pool_fanout_prefers_success_from_one_round():

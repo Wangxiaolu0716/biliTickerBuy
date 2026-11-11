@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 import math
+import random
 import time
 from collections.abc import Callable
 from typing import Any
@@ -15,6 +16,13 @@ from app_cmd.config.NotifierConfig import NotifierConfig
 from util.Constant import (
     BASE_URL,
     BEIJING_TZ,
+    EXCEPTION_BACKOFF_BASE_SECONDS,
+    EXCEPTION_BACKOFF_MAX_SECONDS,
+    RATE_LIMIT_BACKOFF_BASE_SECONDS,
+    RATE_LIMIT_BACKOFF_MAX_SECONDS,
+    RETRY_JITTER_RATIO,
+    RISK_CONTROL_SHORT_DELAY_SECONDS,
+    SINGLE_LINE_MAX_BACKOFF_SECONDS,
     WARMUP_AT_SECONDS,
 )
 from util.notifer.Notifier import NotifierManager
@@ -24,6 +32,36 @@ from util.request.TokenUtil import generate_token
 from util.ErrorCodes import ErrorCodes
 
 from .buy_types import CreateOrderTerminalRule, RetryOutcome
+
+
+def jittered_seconds(seconds: float, ratio: float = RETRY_JITTER_RATIO) -> float:
+    """给休眠加 ±ratio 抖动。
+
+    固定周期的请求串（每 1000ms 一次，误差接近 0）是最容易被风控模型识别的特征之一，
+    这里统一给所有等待加抖动，保证 callsite 不会各自写死 time.sleep(x)。
+    """
+
+    base = max(0.0, float(seconds))
+    if base <= 0:
+        return 0.0
+    ratio = max(0.0, min(1.0, float(ratio)))
+    return max(0.0, base * random.uniform(1.0 - ratio, 1.0 + ratio))
+
+
+def rate_limit_backoff_seconds(streak: int) -> float:
+    """限速类错误码（3/221/900001/900002）的短指数退避：0.3 → 0.6 → 1.2 → 2.4s。"""
+
+    step = max(0, min(int(streak) - 1, 8))
+    delay = RATE_LIMIT_BACKOFF_BASE_SECONDS * (2**step)
+    return jittered_seconds(min(delay, RATE_LIMIT_BACKOFF_MAX_SECONDS))
+
+
+def exception_backoff_seconds(streak: int) -> float:
+    """异常分支的退避：0.2 → 0.4 → 0.8 → … → 3.0s，避免异常路径零间隔空转。"""
+
+    step = max(0, min(int(streak) - 1, 8))
+    delay = EXCEPTION_BACKOFF_BASE_SECONDS * (2**step)
+    return jittered_seconds(min(delay, EXCEPTION_BACKOFF_MAX_SECONDS))
 
 
 def get_qrcode_url(_request, order_id) -> str:
@@ -429,7 +467,28 @@ def handle_proxy_failure(
     proxy_backoff: ProxyBackoff,
     notifier_config: NotifierConfig,
     replenish_proxy_pool: Callable[[], tuple[bool, str | None]] | None = None,
+    *,
+    risk_control: bool = False,
 ) -> tuple[str | None, int | None]:
+    """处理一次线路失败/风控命中，返回 (提示消息, 需要等待的整秒数或 None)。
+
+    risk_control=True 表示这次是 412/限速这类"被风控"，不是线路坏了：
+
+    * 不把当前线路记为失败 —— 否则直连/单代理用户两次 412 就会被冷却 180 秒；
+    * 只有存在备用线路时才换线（换出口确实能缓解 412），单线路原地降速；
+    * 等待 ``RISK_CONTROL_SHORT_DELAY_SECONDS``，而不是 ProxyBackoff 的 30/60/120/240s。
+    """
+
+    if risk_control:
+        risk_message = f"{reason}：被风控，降速重试"
+        if _request.available_proxy_count() > 1 and _request.switch_proxy():
+            proxy_backoff.reset()
+            return (
+                f"{risk_message}，已切换线路到 {_request.current_proxy_display()}",
+                None,
+            )
+        return risk_message, max(1, int(RISK_CONTROL_SHORT_DELAY_SECONDS))
+
     previous_proxy = _request.current_proxy_display()
     cooled = _request.mark_current_proxy_failure(reason)
     if cooled:
@@ -461,6 +520,14 @@ def handle_proxy_failure(
                 else replenish_message
             )
 
+    # 没有备用线路可切：此时长睡等于放弃本场，改用短退避反复试当前线路。
+    if _request.available_proxy_count() <= 1:
+        delay_seconds = max(1, int(SINGLE_LINE_MAX_BACKOFF_SECONDS))
+        exhausted_message = f"无备用线路可用，{delay_seconds} 秒后继续用当前线路重试"
+        if immediate_message:
+            return f"{immediate_message}\n{exhausted_message}", delay_seconds
+        return exhausted_message, delay_seconds
+
     delay_seconds = proxy_backoff.next_delay_seconds()
     if proxy_backoff.should_notify():
         notify_proxy_exhausted(notifier_config, _request, delay_seconds)
@@ -470,8 +537,32 @@ def handle_proxy_failure(
     return exhausted_message, delay_seconds
 
 
+def extract_errno(ret: Any) -> int:
+    """取 errno/code，取不到或格式非法时返回 -1。
+
+    原写法 ``int(ret.get("errno", ret.get("code")))`` 在两个键都缺时抛 TypeError，
+    会被外层 ``except Exception`` 接住且不退避，变成零间隔空转。
+    """
+
+    if not isinstance(ret, dict):
+        return -1
+    raw = ret.get("errno")
+    if raw is None:
+        raw = ret.get("code")
+    if isinstance(raw, bool):
+        return -1
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return int(raw.strip())
+        except ValueError:
+            return -1
+    return -1
+
+
 def format_status_result(prefix: str, ret: dict) -> str:
-    err = int(ret.get("errno", ret.get("code", -1)))
+    err = extract_errno(ret)
     reason = ErrorCodes.get_message(err)
     if reason:
         return append_response_message(err, f"{prefix}: [{err}] {reason}", ret)

@@ -35,12 +35,16 @@ from task.buy_helpers import (
     build_payment_result_with_fallback,
     build_token_payload as _build_token_payload,
     create_order_terminal_rule as _create_order_terminal_rule,
+    exception_backoff_seconds as _exception_backoff_seconds,
+    extract_errno as _extract_errno,
     extract_order_id as _extract_order_id,
     format_retry_reason as _format_retry_reason,
     format_status_result as _format_status_result,
     handle_proxy_failure as _handle_proxy_failure,
     is_create_success as _is_create_success,
+    jittered_seconds as _jittered_seconds,
     prepare_create_request as _prepare_create_request,
+    rate_limit_backoff_seconds as _rate_limit_backoff_seconds,
     summarize_non_json_response as _summarize_non_json_response,
     wait_until_start as _wait_until_start,
 )
@@ -325,6 +329,7 @@ def buy_stream(config: BuyConfig):
         reason: str,
         *,
         attempt: int | None = None,
+        risk_control: bool = False,
     ):
         def replenish_proxy_pool():
             if not str(config.proxy_api_url or "").strip():
@@ -365,6 +370,7 @@ def buy_stream(config: BuyConfig):
             proxy_backoff,
             config.notifier_config,
             replenish_proxy_pool=replenish_proxy_pool,
+            risk_control=risk_control,
         )
         attempt_total = (
             effective_retry_limit if attempt is not None else state.attempt_total
@@ -422,8 +428,11 @@ def buy_stream(config: BuyConfig):
     ) -> Generator[object, None, bool]:
         diagnostic = _request.describe_non_json_response(response)
         summary = _summarize_non_json_response(prefix, diagnostic)
-        # 出现 412 风控时，走代理失败处理，切换代理或进入冷却等待。
-        if "412 风控" in summary:
+        # 412 的判定直接用 HTTP 状态码，不再依赖拼出来的文案（原来靠 "status=412" /
+        # "412 风控" 两次子串匹配，改一个空格就静默失效）。
+        status_code = getattr(response, "status_code", None)
+        is_risk_control = status_code == 412 or "412 风控" in summary
+        if is_risk_control:
             yield emit(
                 "proxy",
                 f"{prefix}触发 412 风控",
@@ -438,7 +447,12 @@ def buy_stream(config: BuyConfig):
                     ),
                 ),
             )
-            yield from handle_proxy_failure(f"{prefix} 412 风控", attempt=attempt)
+            # 412 是"打太快了"，不是线路坏了：不冷却线路，只降速（有多线路时才换线）。
+            yield from handle_proxy_failure(
+                f"{prefix} 412 风控",
+                attempt=attempt,
+                risk_control=True,
+            )
             return True
         yield emit(
             "attempt" if attempt is not None else "error",
@@ -495,6 +509,9 @@ def buy_stream(config: BuyConfig):
         h2_client_options=h2_client_options,
     )
     proxy_backoff = ProxyBackoff(max_seconds=config.proxy_backoff_max_seconds)
+    # 连击计数：异常分支与限速分支的短指数退避用，收到正常响应即清零。
+    fail_streak = 0
+    rate_limit_streak = 0
     is_hot_project = bool(tickets_info.get("is_hot_project", False))
     # use_local_token = bool(config.use_local_token)
     browser_window_state = generate_browser_window_state()
@@ -705,19 +722,21 @@ def buy_stream(config: BuyConfig):
                     attempt + effective_batch_size - 1,
                     effective_retry_limit,
                 )
-                url, payload = _prepare_create_request(
-                    tickets_info,
-                    order_token,
-                    is_hot_project=is_hot_project,
-                    request_result=request_result,
-                    ticket_state=ticket_state,
-                )
                 while attempt <= batch_end:
                     if not isRunning:
                         yield emit("status", "抢票结束")
                         break
                     should_sleep_before_next_attempt = False
                     try:
+                        # 每次 create 都重算 payload：ctoken / timestamp / ptoken 都是一次性的，
+                        # 同一个 ctoken 连发多次是最直白的机器特征（也更容易被判重复提交）。
+                        url, payload = _prepare_create_request(
+                            tickets_info,
+                            order_token,
+                            is_hot_project=is_hot_project,
+                            request_result=request_result,
+                            ticket_state=ticket_state,
+                        )
                         create_response = _request.post(
                             url=url,
                             data=payload,
@@ -725,10 +744,12 @@ def buy_stream(config: BuyConfig):
                         )
                         ret = create_response.json()
                         proxy_backoff.reset()
-                        err = int(ret.get("errno", ret.get("code")))
+                        fail_streak = 0
+                        err = _extract_errno(ret)
                         retry_outcome.set_response(err, ret)
                         _request.handle_100001(err)
                         if _is_create_success(ret, err):
+                            rate_limit_streak = 0
                             yield emit(
                                 "success",
                                 "创建订单成功",
@@ -768,6 +789,23 @@ def buy_stream(config: BuyConfig):
                             yield emit_reprepare("token过期")
                             token_expired = True
                             break
+                        if ErrorCodes.is_rate_limit(err):
+                            # 服务端在说"下单过快/请求太多"：立刻降速，而不是按原节奏继续打。
+                            # 原来这类错误码和 100009（库存不足）走同一条路径，只会把限速
+                            # 告警升级成 412。
+                            rate_limit_streak += 1
+                            rl_delay = _rate_limit_backoff_seconds(rate_limit_streak)
+                            yield emit(
+                                "attempt",
+                                f"[{err}] 触发限速，退避 {rl_delay:.2f}s 后继续",
+                                BuyStreamUpdate(
+                                    attempt_current=attempt,
+                                    attempt_total=effective_retry_limit,
+                                ),
+                            )
+                            time.sleep(rl_delay)
+                            continue
+                        rate_limit_streak = 0
                         if err == 100034:
                             yield emit(
                                 "status",
@@ -787,25 +825,28 @@ def buy_stream(config: BuyConfig):
                         )
                         if not handled_412:
                             retry_outcome.set_exception(exc)
+                            fail_streak += 1
+                            time.sleep(_jittered_seconds(request_interval / 1000))
                     except BiliRateLimitError as e:
                         retry_outcome.set_exception(e)
+                        rate_limit_streak += 1
+                        rl_delay = max(
+                            rate_limit_delay_ms / 1000,
+                            _rate_limit_backoff_seconds(rate_limit_streak),
+                        )
                         yield emit(
                             "attempt",
-                            (
-                                f"{e}，延迟 {rate_limit_delay_ms}ms 后继续"
-                                if rate_limit_delay_ms > 0
-                                else str(e)
-                            ),
+                            f"{e}，退避 {rl_delay:.2f}s 后继续",
                             BuyStreamUpdate(
                                 attempt_current=attempt,
                                 attempt_total=effective_retry_limit,
                             ),
                         )
-                        if rate_limit_delay_ms > 0:
-                            time.sleep(rate_limit_delay_ms / 1000)
-                        continue  # 不需要sleep
+                        time.sleep(rl_delay)
+                        continue  # 已经退避过，不再叠加统一退避
                     except RequestException as e:
                         retry_outcome.set_exception(e)
+                        fail_streak += 1
                         for message in handle_proxy_failure(
                             f"创建订单请求异常({e.__class__.__name__})",
                             attempt=attempt,
@@ -822,6 +863,7 @@ def buy_stream(config: BuyConfig):
                     except Exception as e:
                         logger.exception(e)
                         retry_outcome.set_exception(e)
+                        fail_streak += 1
                         yield emit(
                             "attempt",
                             str(e),
@@ -830,6 +872,9 @@ def buy_stream(config: BuyConfig):
                                 attempt_total=effective_retry_limit,
                             ),
                         )
+                        # 原来这里不退避：一次结构性异常（例如返回体缺字段）就会变成
+                        # 零间隔 prepare→create 的无限空转，是最快把账号打进风控的写法。
+                        time.sleep(_exception_backoff_seconds(fail_streak))
                     finally:
                         attempt += 1
 
@@ -849,7 +894,7 @@ def buy_stream(config: BuyConfig):
                                 logger.warning(f"循环内项目详情复检失败（忽略）：{exc}")
                             _reset_refresh_counter()
                     if should_sleep_before_next_attempt:
-                        time.sleep(request_interval / 1000)
+                        time.sleep(_jittered_seconds(request_interval / 1000))
 
                 if (
                     result is not None
@@ -1007,42 +1052,51 @@ def buy_stream(config: BuyConfig):
         except (HTTPError, RequestException) as e:
             logger.exception(e)
             yield emit("error", f"请求错误: {e}")
+            fail_streak += 1
             for message in handle_proxy_failure(
                 f"订单准备请求异常({e.__class__.__name__})"
             ):
                 yield message
         except JSONDecodeError:
-            yield from handle_non_json_response(
+            handled_412 = yield from handle_non_json_response(
                 "准备订单接口",
                 request_result_normal,
                 attempt=0,
             )
+            if not handled_412:
+                fail_streak += 1
+                time.sleep(_jittered_seconds(request_interval / 1000))
         except BiliRateLimitError as e:
             logger.warning(str(e))
+            rate_limit_streak += 1
+            rl_delay = max(
+                rate_limit_delay_ms / 1000,
+                _rate_limit_backoff_seconds(rate_limit_streak),
+            )
             yield emit(
                 "error",
-                (
-                    f"{e}，延迟 {rate_limit_delay_ms}ms 后重试准备订单"
-                    if rate_limit_delay_ms > 0
-                    else str(e)
-                ),
+                f"{e}，退避 {rl_delay:.2f}s 后重试准备订单",
             )
-            if rate_limit_delay_ms > 0:
-                time.sleep(rate_limit_delay_ms / 1000)
+            time.sleep(rl_delay)
             yield emit_reprepare("订单准备阶段触发 HTTP 429")
         except BiliConnectionError as e:
             logger.warning(str(e))
+            fail_streak += 1
             yield emit(
                 "error",
                 str(e),
             )
+            time.sleep(_exception_backoff_seconds(fail_streak))
         except Exception as e:
             logger.exception(e)
+            fail_streak += 1
             yield emit(
                 "error",
                 f"程序异常: {repr(e)}",
                 BuyStreamUpdate(status="failed"),
             )
+            # 异常后必须退避，否则整轮变成零间隔空转。
+            time.sleep(_exception_backoff_seconds(fail_streak))
 
 
 def buy_new_terminal(

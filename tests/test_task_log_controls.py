@@ -1,7 +1,15 @@
+import os
 import signal
+
+import pytest
 
 import tab.log as task_log
 from util import GlobalStatusInstance, TaskLogEntry
+
+posix_only = pytest.mark.skipif(
+    os.name == "nt",
+    reason="覆盖 POSIX getpgid/killpg 回退路径，Windows 上走 taskkill 分支",
+)
 
 
 def test_is_task_running_treats_posix_zombie_as_stopped(monkeypatch):
@@ -20,6 +28,7 @@ def test_is_task_running_treats_posix_zombie_as_stopped(monkeypatch):
     assert task_log.is_task_running(12345) is False
 
 
+@posix_only
 def test_terminate_task_falls_back_to_process_signal_when_group_denied(monkeypatch):
     running_states = iter([True, False])
     signals_sent = []
@@ -41,6 +50,7 @@ def test_terminate_task_falls_back_to_process_signal_when_group_denied(monkeypat
     assert signals_sent == [(12345, signal.SIGTERM)]
 
 
+@posix_only
 def test_terminate_task_returns_message_when_signal_permission_denied(monkeypatch):
     monkeypatch.setattr(task_log, "is_task_running", lambda _pid: True)
     monkeypatch.setattr(task_log.os, "getpgid", lambda pid: pid)

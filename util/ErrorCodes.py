@@ -21,6 +21,14 @@ class ErrorCodes:
 
     SHOW_RESPONSE_MSG = {10003, 100003}
 
+    # "被限速"类错误码：服务端在告诉你请求太快/太多。
+    # 这类返回的正确反应是降速退避，而不是把它当成 100009（库存不足）一样继续按原节奏打。
+    RATE_LIMIT_CODES = frozenset({3, 221, 900001, 900002})
+
+    @classmethod
+    def is_rate_limit(cls, code: int) -> bool:
+        return code in cls.RATE_LIMIT_CODES
+
     @classmethod
     def get_message(cls, code: int) -> str | None:
         return cls.MESSAGES.get(code)
