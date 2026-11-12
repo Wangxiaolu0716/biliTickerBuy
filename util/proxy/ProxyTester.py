@@ -36,7 +36,7 @@ class ProxyTester:
                 timeout=self.timeout,
                 headers={
                     "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0",
-                },
+                }
             )
             end_time = time.time()
             response_time = round((end_time - start_time) * 1000, 2)  # 毫秒
@@ -73,23 +73,25 @@ class ProxyTester:
                 "name": "api.bilibili.com",
                 "url": "https://api.bilibili.com/x/web-interface/zone",
                 "ipv6": None,  # Dual Stack
-                "parser": lambda data: {
-                    "ip": data.get("data", {}).get("addr", "未知"),
-                    "city": data.get("data", {}).get("city", "未知"),
-                    "isp": data.get("data", {}).get("isp", "未知"),
+                "parser": lambda data: 
+                {
+                    "ip": data.get('data', {}).get('addr', '未知'),
+                    "city": data.get('data', {}).get('city', '未知'),
+                    "isp": data.get('data', {}).get('isp', '未知')
                 },
                 "headers": {
                     "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0",
-                },
+                }
             },
             {
                 "name": "ip-api.com",
                 "url": "http://ip-api.com/json/",
                 "ipv6": False,
-                "parser": lambda data: {
-                    "ip": data.get("query", "未知"),
-                    "city": data.get("city", "未知"),
-                    "isp": data.get("isp", "未知"),
+                "parser": lambda data: 
+                {
+                    "ip": data.get('query', '未知'),
+                    "city": data.get('city', '未知'),
+                    "isp": data.get('isp', '未知')
                 },
             },
             {
@@ -97,9 +99,9 @@ class ProxyTester:
                 "url": "https://ipv4.wtfismyip.com/json",
                 "ipv6": False,
                 "parser": lambda data: {
-                    "ip": data.get("YourFuckingIPAddress", "未知"),
-                    "city": data.get("YourFuckingCity", "未知"),
-                    "isp": data.get("YourFuckingISP", "未知"),
+                    "ip": data.get('YourFuckingIPAddress', '未知'),
+                    "city": data.get('YourFuckingCity', '未知'),
+                    "isp": data.get('YourFuckingISP', '未知')
                 },
             },
             {
@@ -107,28 +109,34 @@ class ProxyTester:
                 "url": "https://ipv6.wtfismyip.com/json",
                 "ipv6": True,
                 "parser": lambda data: {
-                    "ip": data.get("YourFuckingIPAddress", "未知"),
-                    "city": data.get("YourFuckingCity", "未知"),
-                    "isp": data.get("YourFuckingISP", "未知"),
+                    "ip": data.get('YourFuckingIPAddress', '未知'),
+                    "city": data.get('YourFuckingCity', '未知'),
+                    "isp": data.get('YourFuckingISP', '未知')
                 },
             },
             {
                 "name": "api4.ipify.org",
                 "url": "https://api4.ipify.org?format=json",
                 "ipv6": False,
-                "parser": lambda data: {"ip": data.get("ip", "未知")},
+                "parser": lambda data: {
+                    "ip": data.get("ip", "未知")
+                },
             },
             {
                 "name": "api6.ipify.org",
                 "url": "https://api6.ipify.org?format=json",
                 "ipv6": True,
-                "parser": lambda data: {"ip": data.get("ip", "未知")},
+                "parser": lambda data: {
+                    "ip": data.get("ip", "未知")
+                },
             },
             {
                 "name": "httpbin.org",
                 "url": "http://httpbin.org/ip",
                 "ipv6": False,
-                "parser": lambda data: {"ip": data.get("origin", "未知")},
+                "parser": lambda data: {
+                    "ip": data.get("origin", "未知")
+                },
             },
         ]
 
@@ -137,9 +145,10 @@ class ProxyTester:
                 "name": "ip-api.com",
                 "url": "http://ip-api.com/json/",
                 # ip-api.com API is IPv4-only, but can query IPv6 addresses
-                "parser": lambda data: {
-                    "city": data.get("city", "未知"),
-                    "isp": data.get("isp", "未知"),
+                "parser": lambda data:
+                {
+                    "city": data.get('city', '未知'),
+                    "isp": data.get('isp', '未知')
                 },
             }
         ]
@@ -147,19 +156,18 @@ class ProxyTester:
         ip, city, isp = "未知", "未知", "未知"
         sources = []
         # 先获取IP地址
-        for service in ip_services:
+        for service in ip_services:     
             if ip != "未知":
                 break
-            if (
-                ipv6 is not None
-                and service.get("ipv6") is not None
-                and service.get("ipv6") != ipv6
-            ):
+            if ipv6 is not None \
+                and service.get("ipv6") is not None \
+                and service.get("ipv6") != ipv6:
                 continue
             try:
                 ip_response = session.get(
-                    service["url"], headers=service.get("headers", {}), timeout=3
-                )
+                    service["url"], 
+                    headers=service.get("headers", {}), 
+                    timeout=3)
                 if ip_response.status_code == 200:
                     data = ip_response.json()
                     parsed_data = service["parser"](data)
@@ -177,7 +185,8 @@ class ProxyTester:
                     if service.get("ipv6", None) and service["ipv6"] != ipv6:
                         continue
                     try:
-                        geo_response = session.get(service["url"] + ip, timeout=3)
+                        geo_response = session.get(
+                            service["url"]+ip, timeout=3)
                         if geo_response.status_code == 200:
                             data = geo_response.json()
                             parsed_data = service["parser"](data)
@@ -188,7 +197,7 @@ class ProxyTester:
                         continue
 
             return f"{ip}{f' ({city}, {isp})' if city != '未知' or isp != '未知' else ''}, 数据来源: {', '.join(sources)}"
-
+        
         return "IP获取失败"
 
     # 验证代理格式是否正确
