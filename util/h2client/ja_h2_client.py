@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import random
 import socket
 import threading
@@ -484,40 +483,6 @@ class _SourcePoolJA3H2Client(AbstractH2Client):
                 raise httpx.ConnectError(f"no available H2 connections for {host}")
             return pool
 
-    def warm_connections(self, url: str) -> int:
-        """把连接池里所有连接都握手点亮，返回成功建连数。
-
-        ``prewarm_h2_connection`` 只发一个 HEAD，而 ``_slot_chooser`` 是随机挑一条，
-        因此开票前池里通常只有一条连接是热的；fanout 的其余几路会在 T0 现场做
-        TCP + TLS1.3 握手，第一秒的对冲等于不存在。
-        """
-
-        parsed = urllib.parse.urlsplit(url)
-        host = parsed.hostname or self._healthcheck_host
-        port = parsed.port or 443
-        try:
-            pool = list(self._ensure_pool(host, port))
-        except Exception:  # noqa: BLE001 - 预热失败不影响正式流程
-            return 0
-
-        warmed = 0
-        for slot in pool:
-            try:
-                with slot.lock:
-                    slot.connection.connect()
-                warmed += 1
-            except Exception:  # noqa: BLE001 - 单条连接预热失败不影响其它连接
-                continue
-        if warmed:
-            logger.info(
-                "H2 warm_connections host={}:{} slots={}/{} warmed",
-                host,
-                port,
-                warmed,
-                len(pool),
-            )
-        return warmed
-
     def _discard_slot(
         self,
         host: str,
@@ -699,13 +664,6 @@ class _CreateV2FanoutJA3H2Client(_SourcePoolJA3H2Client):
                 request=request,
             )
 
-        # 只有一条出口 IP 时不做并发对冲：同账号、同 ctoken、同 cookie 的几个完全相同的
-        # createV2 在毫秒内从同一个 IP 打出去，只会比串行更像"机器并发提交"，
-        # 反而更容易被判定为重复/异常并发。多出口时才按 source 各发一路。
-        pool = self._fanout_slots(pool)
-        if len(pool) <= 1:
-            return super()._request(method, url, headers=headers, content=content)
-
         executor = ThreadPoolExecutor(
             max_workers=len(pool),
             thread_name_prefix="btb-createv2-fanout",
@@ -781,37 +739,6 @@ class _CreateV2FanoutJA3H2Client(_SourcePoolJA3H2Client):
             (parsed.hostname or "").lower() == self._healthcheck_host.lower()
             and "createv2" in decoded_path.lower()
         )
-
-    @staticmethod
-    def _fanout_same_source_enabled() -> bool:
-        """是否允许同一个出口 IP 内多条连接并发发同一请求（默认关闭）。
-
-        关闭（默认）：每个出口只发 1 路。同一个出口上并发多个「完全相同的 createV2」
-        （同 ctoken / 同 cookie / 同 header）收益很小，更容易被判重复提交。
-
-        打开（BTB_FANOUT_SAME_SOURCE=1）：恢复上游「每个 IP 连 3 条、每秒各打一次」的
-        原始策略（见 #963/#1028/#1058 的实测：单 IP 约 3 req/s 是上限）。需要 A/B 时用它。
-        """
-
-        value = str(os.environ.get("BTB_FANOUT_SAME_SOURCE", "0")).strip().lower()
-        return value in {"1", "true", "on", "yes"}
-
-    @classmethod
-    def _fanout_slots(cls, pool: Sequence[ConnectionSlot]) -> list[ConnectionSlot]:
-        """默认每个出口 source 只保留一条连接用于并发对冲。"""
-
-        if cls._fanout_same_source_enabled():
-            return list(pool)
-
-        seen: set[str] = set()
-        selected: list[ConnectionSlot] = []
-        for slot in pool:
-            key = slot.source.ip
-            if key in seen:
-                continue
-            seen.add(key)
-            selected.append(slot)
-        return selected
 
     def _send_fanout_request(
         self,
@@ -919,11 +846,6 @@ class ProxyPoolCreateV2FanoutJA3H2Client(_CreateV2FanoutJA3H2Client):
         pool = list(self._ensure_pool(host, port))
         if not pool:
             raise self._to_httpx_error(method, url, None)
-
-        # 同 _CreateV2FanoutJA3H2Client：只在多个出口 source 之间对冲，同一出口不并发重复提交。
-        pool = self._fanout_slots(pool)
-        if len(pool) <= 1:
-            return super()._request(method, url, headers=headers, content=content)
 
         executor = ThreadPoolExecutor(
             max_workers=len(pool),

@@ -178,9 +178,7 @@ def test_runtime_uses_default_h2_connections_per_source_ip():
     assert config.h2_connections_per_source_ip == H2CLIENT_CONNECTIONS_PER_SOURCE_IP
 
 
-def test_h2_client_constructor_uses_abstract_client_interface(monkeypatch):
-    # createV2 路径默认会随机百分号编码（BTB_RANDOM_URL_PATH），这里关掉以便断言原始 URL。
-    monkeypatch.setenv("BTB_RANDOM_URL_PATH", "0")
+def test_h2_client_constructor_uses_abstract_client_interface():
     FakeH2Client.instances = []
     request = BiliRequest(
         cookies=[{"name": "SESSDATA", "value": "abc"}],
@@ -317,6 +315,11 @@ def test_proxy_pool_fanout_can_use_direct_single_source():
     FakeH2Connection.post_bodies_by_proxy = {}
     FakeH2Connection.post_errors_by_proxy = {}
     FakeH2Connection.post_responses_by_proxy = {}
+    # 两路都回 900001（"下单过快"）：fanout 会等所有结果，避免"第一路成功就 cancel
+    # 其余"造成 `assert 1 == 2` 的竞态（上游本用例在本地就是这样偶发失败的）。
+    FakeH2Connection.post_responses_by_proxy = {
+        "": [(200, b'{"errno":900001}'), (200, b'{"errno":900001}')]
+    }
     client = ProxyPoolCreateV2FanoutJA3H2Client(
         proxy_pool=["none"],
         connection_factory=FakeH2Connection,
@@ -336,9 +339,7 @@ def test_proxy_pool_fanout_can_use_direct_single_source():
         and instance.calls[-1][1]
         == "https://show.bilibili.com/api/ticket/order/createV2"
     ]
-    # 行为变更：单一出口不再并发重复提交（同 ctoken/同 IP 上并发多个 createV2
-    # 更像"机器并发提交"，反而更容易被风控判重）；多出口时才按 source 各发一路。
-    assert len(business_connections) == 1
+    assert len(business_connections) == 2
     assert {instance.source_ip for instance in business_connections} == {None}
     assert {instance.proxy_url for instance in business_connections} == {None}
 
@@ -354,6 +355,9 @@ def test_proxy_pool_fanout_detects_percent_encoded_create_v2_path():
         connections_per_source_ip=2,
     )
     encoded_create_url = "https://show.bilibili.com/api/%74icket/%6frder/crea%74eV%32"
+    FakeH2Connection.post_responses_by_proxy = {
+        "": [(200, b'{"errno":900001}'), (200, b'{"errno":900001}')]
+    }
 
     response = client.post(
         encoded_create_url,
@@ -366,8 +370,7 @@ def test_proxy_pool_fanout_detects_percent_encoded_create_v2_path():
         for instance in FakeH2Connection.instances
         if instance.calls and instance.calls[-1][1] == encoded_create_url
     ]
-    # 单出口 → 只发 1 路（见上一条注释）；这里同时验证百分号编码的路径仍被识别为 createV2。
-    assert len(business_connections) == 1
+    assert len(business_connections) == 2
 
 
 def test_proxy_pool_fanout_prefers_success_from_one_round():

@@ -1,4 +1,3 @@
-import os
 import secrets
 import time
 from collections.abc import Callable
@@ -18,8 +17,6 @@ from util.request.BrowerState import (
 from util.request.CookieManager import CookieManager
 from util.request.exceptions import BiliConnectionError, BiliRateLimitError
 from util.proxy.ProxyManager import ProxyManager
-import urllib.parse
-import random
 
 
 class BiliRequest:
@@ -240,37 +237,8 @@ class BiliRequest:
             client.head(url)
         except httpx.HTTPError:
             pass
-        # 一个 HEAD 只会点亮连接池里的随机一条；fanout 想在对冲时真的有 N 路可用，
-        # 必须在开票前把池里所有连接都握手完，否则 T0 那两路要现场做 TLS 握手。
-        warm_all = getattr(client, "warm_connections", None)
-        if callable(warm_all):
-            try:
-                warm_all(url)
-            except Exception:  # noqa: BLE001 - 预热失败不影响正式流程
-                pass
-
-    @staticmethod
-    def _random_url_path_enabled() -> bool:
-        """createV2 路径随机百分号编码的开关（默认保持原行为，可用 BTB_RANDOM_URL_PATH=0 关闭）。
-
-        真实浏览器不会把 /api/ticket/order/createV2 随机编码成 cre%61teV2，
-        这本身是一个机器特征；是否值得保留需要按 412 率实测，故做成开关。
-        """
-
-        value = str(os.environ.get("BTB_RANDOM_URL_PATH", "1")).strip().lower()
-        return value not in {"0", "false", "off", "no"}
-
-    @staticmethod
-    def _random_quote(path: str) -> str:
-        return "".join(random.choice([c, f"%{ord(c):02x}"]) for c in path)
 
     def _h2_send(self, method: str, url: str, data=None, isJson=False):
-        parsed_url = urllib.parse.urlparse(url)
-
-        if "createV2" in parsed_url.path and BiliRequest._random_url_path_enabled():
-            new_path = BiliRequest._random_quote(parsed_url.path)
-            url = urllib.parse.urlunparse(parsed_url._replace(path=new_path))
-
         if self._h2_client is None:
             self._h2_client = self._build_h2_client()
         client = self._h2_client

@@ -13,13 +13,11 @@ from __future__ import annotations
 import pytest
 
 from task.buy_helpers import (
-    exception_backoff_seconds,
     extract_errno,
     handle_proxy_failure,
     jittered_seconds,
 )
 from util.Constant import (
-    EXCEPTION_BACKOFF_MAX_SECONDS,
     DEFAULT_RATE_LIMIT_DELAY_MS,
     RETRY_JITTER_RATIO,
     RISK_CONTROL_BACKOFF_BASE_SECONDS,
@@ -53,12 +51,6 @@ def test_http_429_uses_fixed_short_delay():
     """
 
     assert 250 <= DEFAULT_RATE_LIMIT_DELAY_MS <= 350
-
-
-def test_exception_backoff_is_capped():
-    values = [exception_backoff_seconds(streak) for streak in range(1, 15)]
-    assert values[0] > 0
-    assert max(values) <= EXCEPTION_BACKOFF_MAX_SECONDS * (1 + RETRY_JITTER_RATIO)
 
 
 @pytest.mark.parametrize(
@@ -204,23 +196,20 @@ def test_single_line_failure_uses_short_backoff():
     assert backoff.rounds == 0
 
 
-def test_fanout_slots_dedupe_by_source():
-    from util.h2client.ja_h2_client import _CreateV2FanoutJA3H2Client
+def test_proxy_registry_randomizes_initial_index_for_multi_proxy(monkeypatch):
+    from util.proxy.ProxyState import ProxyStateRegistry
 
-    class _Source:
-        def __init__(self, ip):
-            self.ip = ip
+    proxy_list = [f"http://127.0.0.1:{8000 + i}" for i in range(8)]
+    starts = {
+        ProxyStateRegistry(proxy_list, mask_proxy=str).current_index for _ in range(40)
+    }
+    # 多线路时起始 index 不应固定为 0（否则多任务会把同一条代理打爆）
+    assert any(index != 0 for index in starts)
 
-    class _Slot:
-        def __init__(self, ip):
-            self.source = _Source(ip)
-
-    same_source = [_Slot("proxy-1") for _ in range(3)]
-    assert len(_CreateV2FanoutJA3H2Client._fanout_slots(same_source)) == 1
-
-    multi = [_Slot("proxy-1"), _Slot("proxy-2"), _Slot("proxy-2"), _Slot("proxy-3")]
-    assert len(_CreateV2FanoutJA3H2Client._fanout_slots(multi)) == 3
-    assert _CreateV2FanoutJA3H2Client._fanout_slots([]) == []
+    monkeypatch.setenv("BTB_PROXY_RANDOM_START", "0")
+    assert ProxyStateRegistry(proxy_list, mask_proxy=str).current_index == 0
+    # 单线路永远是 0
+    assert ProxyStateRegistry(["none"], mask_proxy=str).current_index == 0
 
 
 def test_risk_control_single_line_escalates_after_quick_retries():
@@ -275,19 +264,3 @@ def test_risk_control_multi_line_never_waits():
             risk_streak=streak,
         )
         assert delay is None
-
-
-def test_proxy_registry_randomizes_initial_index_for_multi_proxy(monkeypatch):
-    from util.proxy.ProxyState import ProxyStateRegistry
-
-    proxy_list = [f"http://127.0.0.1:{8000 + i}" for i in range(8)]
-    starts = {
-        ProxyStateRegistry(proxy_list, mask_proxy=str).current_index for _ in range(40)
-    }
-    # 多线路时起始 index 不应固定为 0（否则多任务会把同一条代理打爆）
-    assert any(index != 0 for index in starts)
-
-    monkeypatch.setenv("BTB_PROXY_RANDOM_START", "0")
-    assert ProxyStateRegistry(proxy_list, mask_proxy=str).current_index == 0
-    # 单线路永远是 0
-    assert ProxyStateRegistry(["none"], mask_proxy=str).current_index == 0

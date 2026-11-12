@@ -61,10 +61,6 @@ RISK_CONTROL_PROXY_COOLDOWN_MIN_SECONDS = 600
 # 原逻辑在这种情况下会走 ProxyBackoff 的 30/60/120/240s，开票窗口里等于出局。
 SINGLE_LINE_MAX_BACKOFF_SECONDS = 3
 
-# 异常分支的统一退避（原来异常路径完全不 sleep，会变成零间隔空转）。
-EXCEPTION_BACKOFF_BASE_SECONDS = 0.2
-EXCEPTION_BACKOFF_MAX_SECONDS = 3.0
-
 # 注：HTTP 429 的重试间隔用 config.rate_limit_delay_ms（默认 DEFAULT_RATE_LIMIT_DELAY_MS=300ms）。
 # 依据 issues#963 + discussions#390：429 应"等 333ms 继续"，**不能指数退避**
 # —— 429 只是没抽中，退避会直接减少有效请求次数（实测指数退避让每分钟尝试从 240 掉到 25）。

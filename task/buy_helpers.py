@@ -16,8 +16,6 @@ from app_cmd.config.NotifierConfig import NotifierConfig
 from util.Constant import (
     BASE_URL,
     BEIJING_TZ,
-    EXCEPTION_BACKOFF_BASE_SECONDS,
-    EXCEPTION_BACKOFF_MAX_SECONDS,
     RETRY_JITTER_RATIO,
     RISK_CONTROL_BACKOFF_BASE_SECONDS,
     RISK_CONTROL_BACKOFF_MAX_SECONDS,
@@ -48,14 +46,6 @@ def jittered_seconds(seconds: float, ratio: float = RETRY_JITTER_RATIO) -> float
         return 0.0
     ratio = max(0.0, min(1.0, float(ratio)))
     return max(0.0, base * random.uniform(1.0 - ratio, 1.0 + ratio))
-
-
-def exception_backoff_seconds(streak: int) -> float:
-    """异常分支的退避：0.2 → 0.4 → 0.8 → … → 3.0s，避免异常路径零间隔空转。"""
-
-    step = max(0, min(int(streak) - 1, 8))
-    delay = EXCEPTION_BACKOFF_BASE_SECONDS * (2**step)
-    return jittered_seconds(min(delay, EXCEPTION_BACKOFF_MAX_SECONDS))
 
 
 def get_qrcode_url(_request, order_id) -> str:
