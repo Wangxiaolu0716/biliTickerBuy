@@ -53,6 +53,9 @@ RISK_CONTROL_SHORT_DELAY_SECONDS = 1
 RISK_CONTROL_QUICK_RETRIES = 2
 RISK_CONTROL_BACKOFF_BASE_SECONDS = 30
 RISK_CONTROL_BACKOFF_MAX_SECONDS = 180
+# 多线路时，412 命中就把该出口冷却这么久（至少），不再等失败阈值：
+# 412 是 IP 级封禁，社区实测 10~15 分钟，180s 太短会让程序反复选回已封的 IP。
+RISK_CONTROL_PROXY_COOLDOWN_MIN_SECONDS = 600
 
 # 只有一条线路（直连/单代理）时，线路级失败的最长退避秒数。
 # 原逻辑在这种情况下会走 ProxyBackoff 的 30/60/120/240s，开票窗口里等于出局。

@@ -43,6 +43,7 @@ class BiliRequest:
             failure_threshold=proxy_failure_threshold,
             cooldown_seconds=proxy_cooldown_seconds,
         )
+        self.proxy_cooldown_seconds = float(proxy_cooldown_seconds)
         self.cookieManager = CookieManager(cookies_config_path, cookies)
         self.headers = build_headers_from_browser_state(
             self.browser_state,
@@ -150,6 +151,13 @@ class BiliRequest:
 
     def mark_current_proxy_success(self) -> None:
         self.proxy_manager.mark_current_success()
+
+    def cool_down_current_proxy(
+        self, reason: str, seconds: float | None = None
+    ) -> bool:
+        """把当前线路立刻打入冷却（412 这类 IP 级封禁用，不等失败阈值）。"""
+
+        return self.proxy_manager.cool_down_current(reason, seconds)
 
     def describe_non_json_response(
         self, response: Response, body_limit: int = 300

@@ -25,6 +25,7 @@ from util.Constant import (
     RETRY_JITTER_RATIO,
     RISK_CONTROL_BACKOFF_BASE_SECONDS,
     RISK_CONTROL_BACKOFF_MAX_SECONDS,
+    RISK_CONTROL_PROXY_COOLDOWN_MIN_SECONDS,
     RISK_CONTROL_QUICK_RETRIES,
     RISK_CONTROL_SHORT_DELAY_SECONDS,
     SINGLE_LINE_MAX_BACKOFF_SECONDS,
@@ -100,12 +101,15 @@ class _FakeBackoff:
 
 
 class _FakeRequest:
+    proxy_cooldown_seconds = 180.0
+
     def __init__(self, proxies, available):
         self.proxies = proxies
         self.available = available
         self.current = proxies[0]
         self.failure_marks = 0
         self.switch_calls = 0
+        self.cool_downs: list[tuple[str, float]] = []
 
     def current_proxy_display(self):
         return self.current
@@ -113,6 +117,10 @@ class _FakeRequest:
     def mark_current_proxy_failure(self, reason):
         self.failure_marks += 1
         return False
+
+    def cool_down_current_proxy(self, reason, seconds=None):
+        self.cool_downs.append((reason, float(seconds or 0)))
+        return True
 
     def switch_proxy(self):
         self.switch_calls += 1
@@ -170,6 +178,9 @@ def test_risk_control_switches_line_when_available():
     assert request.failure_marks == 0
     assert delay is None
     assert "p2" in (message or "")
+    # 412 命中后该出口要被立刻冷却，且冷却时长不短于下限（412 是 10~15 分钟的 IP 封禁）
+    assert len(request.cool_downs) == 1
+    assert request.cool_downs[0][1] >= float(RISK_CONTROL_PROXY_COOLDOWN_MIN_SECONDS)
 
 
 def test_single_line_failure_uses_short_backoff():

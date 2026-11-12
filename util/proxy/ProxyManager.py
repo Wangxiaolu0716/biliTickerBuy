@@ -148,3 +148,6 @@ class ProxyManager:
 
     def mark_current_failure(self, reason: str) -> bool:
         return self.state_registry.record_current_failure(reason)
+
+    def cool_down_current(self, reason: str, seconds: float | None = None) -> bool:
+        return self.state_registry.cool_down_current(reason, seconds)

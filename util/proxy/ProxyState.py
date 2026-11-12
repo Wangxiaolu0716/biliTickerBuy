@@ -81,6 +81,22 @@ class ProxyStateRegistry:
         state.recent_failures.clear()
         return True
 
+    def cool_down_current(self, reason: str = "", seconds: float | None = None) -> bool:
+        """立刻把当前线路打入冷却，不等失败阈值。
+
+        用于 412 这种"硬信号"：它表示该 IP 已被限流/封禁（社区实测约 10~15 分钟）。
+        按阈值累计（默认 2 次）意味着要白白多打一发请求，还会让已封禁的 IP 在轮换里被再次选中。
+        """
+
+        now = time.time()
+        state = self.current_state()
+        state.total_failures += 1
+        state.last_reason = reason or "cool_down"
+        window = float(seconds) if seconds is not None else float(self.cooldown_seconds)
+        state.cooldown_until = max(state.cooldown_until, now + max(1.0, window))
+        state.recent_failures.clear()
+        return True
+
     def available_count(self, now: float | None = None) -> int:
         current_time = time.time() if now is None else now
         return sum(1 for state in self.states if state.is_available(current_time))

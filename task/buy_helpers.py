@@ -23,6 +23,7 @@ from util.Constant import (
     RETRY_JITTER_RATIO,
     RISK_CONTROL_BACKOFF_BASE_SECONDS,
     RISK_CONTROL_BACKOFF_MAX_SECONDS,
+    RISK_CONTROL_PROXY_COOLDOWN_MIN_SECONDS,
     RISK_CONTROL_QUICK_RETRIES,
     RISK_CONTROL_SHORT_DELAY_SECONDS,
     SINGLE_LINE_MAX_BACKOFF_SECONDS,
@@ -484,14 +485,23 @@ def handle_proxy_failure(
     """
 
     if risk_control:
-        # 有多条线路时，换出口是唯一能真正解开 412 的动作（IP 级风控）。
-        if _request.available_proxy_count() > 1 and _request.switch_proxy():
-            proxy_backoff.reset()
-            return (
-                f"{reason}：被风控（IP 级），已切换线路到 "
-                f"{_request.current_proxy_display()}",
-                None,
+        # 有多条线路时，"把这个 IP 打入冷却 + 换出口"才是正确动作：
+        # 412 是 IP 级封禁（社区实测 10~15 分钟），
+        #   * 不冷却 → 轮换很快又会选回这个已封的 IP，白白浪费请求；
+        #   * 等失败阈值（默认 2）才冷却 → 每个坏 IP 要多挨一发。
+        if _request.available_proxy_count() > 1:
+            cooldown_seconds = max(
+                float(RISK_CONTROL_PROXY_COOLDOWN_MIN_SECONDS),
+                float(getattr(_request, "proxy_cooldown_seconds", 0) or 0),
             )
+            _request.cool_down_current_proxy(reason, cooldown_seconds)
+            if _request.switch_proxy():
+                proxy_backoff.reset()
+                return (
+                    f"{reason}：被风控（IP 级），该出口冷却 {int(cooldown_seconds)} 秒，"
+                    f"已切换线路到 {_request.current_proxy_display()}",
+                    None,
+                )
 
         # 单线路：前几次快速重试（可能只是瞬时抖动），之后按指数退避。
         # 依据 discussions#390 / issues#963：412 通常是 10~15 分钟的 IP 封禁，
