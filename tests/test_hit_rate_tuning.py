@@ -15,11 +15,9 @@ import pytest
 from task.buy_helpers import (
     extract_errno,
     handle_proxy_failure,
-    jittered_seconds,
 )
 from util.Constant import (
     DEFAULT_RATE_LIMIT_DELAY_MS,
-    RETRY_JITTER_RATIO,
     RISK_CONTROL_BACKOFF_BASE_SECONDS,
     RISK_CONTROL_BACKOFF_MAX_SECONDS,
     RISK_CONTROL_PROXY_COOLDOWN_MIN_SECONDS,
@@ -30,24 +28,11 @@ from util.Constant import (
 from util.ErrorCodes import ErrorCodes
 
 
-@pytest.mark.parametrize("base", [0.3, 1.0, 2.4])
-def test_jittered_seconds_within_ratio(base):
-    for _ in range(50):
-        value = jittered_seconds(base)
-        assert (
-            base * (1 - RETRY_JITTER_RATIO) <= value <= base * (1 + RETRY_JITTER_RATIO)
-        )
-
-
-def test_jittered_seconds_rejects_non_positive():
-    assert jittered_seconds(0) == 0.0
-    assert jittered_seconds(-1) == 0.0
-
-
 def test_http_429_uses_fixed_short_delay():
     """429 只是"没抽中"，必须固定短延迟重试——指数退避会砍掉抽签次数。
 
     实测依据：某次真实抢票里，指数退避让第一分钟只有 25 次尝试（250ms 理论值 240 次）。
+    现在保持上游原样：固定 rate_limit_delay_ms，不加抖动、不递增。
     """
 
     assert 250 <= DEFAULT_RATE_LIMIT_DELAY_MS <= 350

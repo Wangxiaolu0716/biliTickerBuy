@@ -41,7 +41,6 @@ from task.buy_helpers import (
     format_status_result as _format_status_result,
     handle_proxy_failure as _handle_proxy_failure,
     is_create_success as _is_create_success,
-    jittered_seconds as _jittered_seconds,
     prepare_create_request as _prepare_create_request,
     summarize_non_json_response as _summarize_non_json_response,
     wait_until_start as _wait_until_start,
@@ -813,21 +812,21 @@ def buy_stream(config: BuyConfig):
                             retry_outcome.set_exception(exc)
                     except BiliRateLimitError as e:
                         retry_outcome.set_exception(e)
-                        # 429 = CDN 层没抽中，固定短延迟立刻再打；指数退避会直接砍掉抽签次数
-                        # （实测会让每分钟尝试从 240 掉到 25）。
-                        rl_delay = max(
-                            0.05, rate_limit_delay_ms / 1000
-                        ) * random.uniform(0.9, 1.1)
                         yield emit(
                             "attempt",
-                            f"{e}，{rl_delay:.2f}s 后继续",
+                            (
+                                f"{e}，延迟 {rate_limit_delay_ms}ms 后继续"
+                                if rate_limit_delay_ms > 0
+                                else str(e)
+                            ),
                             BuyStreamUpdate(
                                 attempt_current=attempt,
                                 attempt_total=effective_retry_limit,
                             ),
                         )
-                        time.sleep(rl_delay)
-                        continue  # 已经退避过，不再叠加统一退避
+                        if rate_limit_delay_ms > 0:
+                            time.sleep(rate_limit_delay_ms / 1000)
+                        continue  # 不需要sleep
                     except RequestException as e:
                         retry_outcome.set_exception(e)
                         for message in handle_proxy_failure(
@@ -873,7 +872,7 @@ def buy_stream(config: BuyConfig):
                                 logger.warning(f"循环内项目详情复检失败（忽略）：{exc}")
                             _reset_refresh_counter()
                     if should_sleep_before_next_attempt:
-                        time.sleep(_jittered_seconds(request_interval / 1000))
+                        time.sleep(request_interval / 1000)
 
                 if (
                     result is not None
@@ -1045,12 +1044,16 @@ def buy_stream(config: BuyConfig):
                 pass
         except BiliRateLimitError as e:
             logger.warning(str(e))
-            rl_delay = max(0.05, rate_limit_delay_ms / 1000) * random.uniform(0.9, 1.1)
             yield emit(
                 "error",
-                f"{e}，{rl_delay:.2f}s 后重试准备订单",
+                (
+                    f"{e}，延迟 {rate_limit_delay_ms}ms 后重试准备订单"
+                    if rate_limit_delay_ms > 0
+                    else str(e)
+                ),
             )
-            time.sleep(rl_delay)
+            if rate_limit_delay_ms > 0:
+                time.sleep(rate_limit_delay_ms / 1000)
             yield emit_reprepare("订单准备阶段触发 HTTP 429")
         except BiliConnectionError as e:
             logger.warning(str(e))

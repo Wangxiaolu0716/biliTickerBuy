@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import datetime
 import math
-import random
 import time
 from collections.abc import Callable
 from typing import Any
@@ -16,7 +15,6 @@ from app_cmd.config.NotifierConfig import NotifierConfig
 from util.Constant import (
     BASE_URL,
     BEIJING_TZ,
-    RETRY_JITTER_RATIO,
     RISK_CONTROL_BACKOFF_BASE_SECONDS,
     RISK_CONTROL_BACKOFF_MAX_SECONDS,
     RISK_CONTROL_PROXY_COOLDOWN_MIN_SECONDS,
@@ -32,20 +30,6 @@ from util.request.TokenUtil import generate_token
 from util.ErrorCodes import ErrorCodes
 
 from .buy_types import CreateOrderTerminalRule, RetryOutcome
-
-
-def jittered_seconds(seconds: float, ratio: float = RETRY_JITTER_RATIO) -> float:
-    """给休眠加 ±ratio 抖动。
-
-    固定周期的请求串（每 1000ms 一次，误差接近 0）是最容易被风控模型识别的特征之一，
-    这里统一给所有等待加抖动，保证 callsite 不会各自写死 time.sleep(x)。
-    """
-
-    base = max(0.0, float(seconds))
-    if base <= 0:
-        return 0.0
-    ratio = max(0.0, min(1.0, float(ratio)))
-    return max(0.0, base * random.uniform(1.0 - ratio, 1.0 + ratio))
 
 
 def get_qrcode_url(_request, order_id) -> str:

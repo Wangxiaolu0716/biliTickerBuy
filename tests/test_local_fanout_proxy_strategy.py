@@ -1,4 +1,6 @@
+import re
 from typing import Any
+from urllib.parse import unquote
 
 import httpx
 
@@ -200,11 +202,19 @@ def test_h2_client_constructor_uses_abstract_client_interface():
         ("SESSDATA", "abc", ".bilibili.com"),
         ("SESSDATA", "abc", ".bilibili.com"),
     ]
-    assert client.calls == [
-        ("head", url),
-        ("post", url, None, {"project_id": 1}),
-        ("get", url, {"project_id": 1}),
-    ]
+
+    # createV2 的路径会被 _random_quote 随机百分号编码（上游行为，连 "/" 都可能被编码），
+    # 所以比较"解码 + 折叠重复斜杠"之后的 URL。
+    def _normalize(target: str) -> str:
+        text = unquote(target)
+        scheme, _, rest = text.partition("://")
+        return f"{scheme}://{re.sub(r'/+', '/', rest)}"
+
+    assert client.calls[0] == ("head", url)
+    assert _normalize(client.calls[1][1]) == _normalize(url)
+    assert client.calls[1][2:] == (None, {"project_id": 1})
+    assert _normalize(client.calls[2][1]) == _normalize(url)
+    assert client.calls[2][2] == {"project_id": 1}
 
     request._invalidate_h2_client()
 
