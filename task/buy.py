@@ -44,7 +44,6 @@ from task.buy_helpers import (
     is_create_success as _is_create_success,
     jittered_seconds as _jittered_seconds,
     prepare_create_request as _prepare_create_request,
-    rate_limit_backoff_seconds as _rate_limit_backoff_seconds,
     summarize_non_json_response as _summarize_non_json_response,
     wait_until_start as _wait_until_start,
 )
@@ -516,7 +515,6 @@ def buy_stream(config: BuyConfig):
     proxy_backoff = ProxyBackoff(max_seconds=config.proxy_backoff_max_seconds)
     # 连击计数：异常分支与限速分支的短指数退避用，收到正常响应即清零。
     fail_streak = 0
-    rate_limit_streak = 0
     # 连续 412 次数：单线路时决定"快速重试"还是"指数退避 + 提示换网络/换账号"。
     risk_streak = 0
     is_hot_project = bool(tickets_info.get("is_hot_project", False))
@@ -682,6 +680,8 @@ def buy_stream(config: BuyConfig):
             order_token = _extract_prepare_token(request_result)
             if not order_token:
                 yield emit_reprepare("订单准备未返回有效 token")
+                # 准备阶段失败（例如 80110765 前方拥堵）如果零间隔重打，会变成紧密循环
+                time.sleep(_jittered_seconds(request_interval / 1000))
                 continue
             # else:
             #     # normal
@@ -757,7 +757,6 @@ def buy_stream(config: BuyConfig):
                         retry_outcome.set_response(err, ret)
                         _request.handle_100001(err)
                         if _is_create_success(ret, err):
-                            rate_limit_streak = 0
                             yield emit(
                                 "success",
                                 "创建订单成功",
@@ -797,23 +796,8 @@ def buy_stream(config: BuyConfig):
                             yield emit_reprepare("token过期")
                             token_expired = True
                             break
-                        if ErrorCodes.is_rate_limit(err):
-                            # 服务端在说"下单过快/请求太多"：立刻降速，而不是按原节奏继续打。
-                            # 原来这类错误码和 100009（库存不足）走同一条路径，只会把限速
-                            # 告警升级成 412。
-                            rate_limit_streak += 1
-                            rl_delay = _rate_limit_backoff_seconds(rate_limit_streak)
-                            yield emit(
-                                "attempt",
-                                f"[{err}] 触发限速，退避 {rl_delay:.2f}s 后继续",
-                                BuyStreamUpdate(
-                                    attempt_current=attempt,
-                                    attempt_total=effective_retry_limit,
-                                ),
-                            )
-                            time.sleep(rl_delay)
-                            continue
-                        rate_limit_streak = 0
+                        # 900001/900002/221/3 是「1 秒盾」的正常抽签结果，不是"打太快"，
+                        # 按正常节奏继续打（依 discussions#390 / issues#963：退避只会减少抽签次数）。
                         if err == 100034:
                             yield emit(
                                 "status",
@@ -837,14 +821,14 @@ def buy_stream(config: BuyConfig):
                             time.sleep(_jittered_seconds(request_interval / 1000))
                     except BiliRateLimitError as e:
                         retry_outcome.set_exception(e)
-                        rate_limit_streak += 1
+                        # 429 = CDN 层没抽中，固定短延迟立刻再打；指数退避会直接砍掉抽签次数
+                        # （实测会让每分钟尝试从 240 掉到 25）。
                         rl_delay = max(
-                            rate_limit_delay_ms / 1000,
-                            _rate_limit_backoff_seconds(rate_limit_streak),
-                        )
+                            0.05, rate_limit_delay_ms / 1000
+                        ) * random.uniform(0.9, 1.1)
                         yield emit(
                             "attempt",
-                            f"{e}，退避 {rl_delay:.2f}s 后继续",
+                            f"{e}，{rl_delay:.2f}s 后继续",
                             BuyStreamUpdate(
                                 attempt_current=attempt,
                                 attempt_total=effective_retry_limit,
@@ -1076,14 +1060,10 @@ def buy_stream(config: BuyConfig):
                 time.sleep(_jittered_seconds(request_interval / 1000))
         except BiliRateLimitError as e:
             logger.warning(str(e))
-            rate_limit_streak += 1
-            rl_delay = max(
-                rate_limit_delay_ms / 1000,
-                _rate_limit_backoff_seconds(rate_limit_streak),
-            )
+            rl_delay = max(0.05, rate_limit_delay_ms / 1000) * random.uniform(0.9, 1.1)
             yield emit(
                 "error",
-                f"{e}，退避 {rl_delay:.2f}s 后重试准备订单",
+                f"{e}，{rl_delay:.2f}s 后重试准备订单",
             )
             time.sleep(rl_delay)
             yield emit_reprepare("订单准备阶段触发 HTTP 429")

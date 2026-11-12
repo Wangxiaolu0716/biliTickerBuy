@@ -21,13 +21,18 @@ class ErrorCodes:
 
     SHOW_RESPONSE_MSG = {10003, 100003}
 
-    # "被限速"类错误码：服务端在告诉你请求太快/太多。
-    # 这类返回的正确反应是降速退避，而不是把它当成 100009（库存不足）一样继续按原节奏打。
-    RATE_LIMIT_CODES = frozenset({3, 221, 900001, 900002})
+    # 「1 秒盾 / 正常限流」类错误码。
+    #
+    # 注意：这些**不是**"你打太快了请退避"的信号，而是会员购正常的抽签结果：
+    #   * 900001/900002 「前方拥堵 / 下单过快」= 同一账号同一场次 1 秒内已经发过一次有效请求（1 秒盾）；
+    #   * 221/3 同类。
+    # 社区实测（discussions#390 / issues#963）的结论是：这类返回应该按**正常节奏继续打**，
+    # 退避只会减少抽签次数。真正需要退避的只有 412（IP/账号封禁，见 RISK_CONTROL_*）。
+    SHIELD_CODES = frozenset({3, 221, 900001, 900002})
 
     @classmethod
-    def is_rate_limit(cls, code: int) -> bool:
-        return code in cls.RATE_LIMIT_CODES
+    def is_shield(cls, code: int) -> bool:
+        return code in cls.SHIELD_CODES
 
     @classmethod
     def get_message(cls, code: int) -> str | None:

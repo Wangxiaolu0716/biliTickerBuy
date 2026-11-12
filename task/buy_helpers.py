@@ -18,8 +18,6 @@ from util.Constant import (
     BEIJING_TZ,
     EXCEPTION_BACKOFF_BASE_SECONDS,
     EXCEPTION_BACKOFF_MAX_SECONDS,
-    RATE_LIMIT_BACKOFF_BASE_SECONDS,
-    RATE_LIMIT_BACKOFF_MAX_SECONDS,
     RETRY_JITTER_RATIO,
     RISK_CONTROL_BACKOFF_BASE_SECONDS,
     RISK_CONTROL_BACKOFF_MAX_SECONDS,
@@ -50,14 +48,6 @@ def jittered_seconds(seconds: float, ratio: float = RETRY_JITTER_RATIO) -> float
         return 0.0
     ratio = max(0.0, min(1.0, float(ratio)))
     return max(0.0, base * random.uniform(1.0 - ratio, 1.0 + ratio))
-
-
-def rate_limit_backoff_seconds(streak: int) -> float:
-    """限速类错误码（3/221/900001/900002）的短指数退避：0.3 → 0.6 → 1.2 → 2.4s。"""
-
-    step = max(0, min(int(streak) - 1, 8))
-    delay = RATE_LIMIT_BACKOFF_BASE_SECONDS * (2**step)
-    return jittered_seconds(min(delay, RATE_LIMIT_BACKOFF_MAX_SECONDS))
 
 
 def exception_backoff_seconds(streak: int) -> float:

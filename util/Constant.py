@@ -4,7 +4,7 @@ import datetime
 BEIJING_TZ = datetime.timezone(datetime.timedelta(hours=8), name="Asia/Shanghai")
 GO_UPLOADED_FILES_STATE_KEY = "go.uploaded_config_files"
 DEFAULT_REQUEST_INTERVAL = 1000
-DEFAULT_RATE_LIMIT_DELAY_MS = 800
+DEFAULT_RATE_LIMIT_DELAY_MS = 300
 DEFAULT_CREATE_REQUEST_BATCH_SIZE = 3
 DEFAULT_PROXY_MAX_CONSECUTIVE_FAILURES = 2
 DEFAULT_PROXY_COOLDOWN_SECONDS = 180
@@ -65,6 +65,6 @@ SINGLE_LINE_MAX_BACKOFF_SECONDS = 3
 EXCEPTION_BACKOFF_BASE_SECONDS = 0.2
 EXCEPTION_BACKOFF_MAX_SECONDS = 3.0
 
-# 限速类错误码（下单过快/请求过多）的短指数退避。
-RATE_LIMIT_BACKOFF_BASE_SECONDS = 0.3
-RATE_LIMIT_BACKOFF_MAX_SECONDS = 2.4
+# 注：HTTP 429 的重试间隔用 config.rate_limit_delay_ms（默认 DEFAULT_RATE_LIMIT_DELAY_MS=300ms）。
+# 依据 issues#963 + discussions#390：429 应"等 333ms 继续"，**不能指数退避**
+# —— 429 只是没抽中，退避会直接减少有效请求次数（实测指数退避让每分钟尝试从 240 掉到 25）。

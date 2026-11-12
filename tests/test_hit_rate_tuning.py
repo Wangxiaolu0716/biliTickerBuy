@@ -17,11 +17,10 @@ from task.buy_helpers import (
     extract_errno,
     handle_proxy_failure,
     jittered_seconds,
-    rate_limit_backoff_seconds,
 )
 from util.Constant import (
     EXCEPTION_BACKOFF_MAX_SECONDS,
-    RATE_LIMIT_BACKOFF_MAX_SECONDS,
+    DEFAULT_RATE_LIMIT_DELAY_MS,
     RETRY_JITTER_RATIO,
     RISK_CONTROL_BACKOFF_BASE_SECONDS,
     RISK_CONTROL_BACKOFF_MAX_SECONDS,
@@ -47,11 +46,13 @@ def test_jittered_seconds_rejects_non_positive():
     assert jittered_seconds(-1) == 0.0
 
 
-def test_rate_limit_backoff_is_capped_and_escalates():
-    values = [rate_limit_backoff_seconds(streak) for streak in range(1, 10)]
-    assert values[0] > 0
-    assert values[1] > values[0]
-    assert max(values) <= RATE_LIMIT_BACKOFF_MAX_SECONDS * (1 + RETRY_JITTER_RATIO)
+def test_http_429_uses_fixed_short_delay():
+    """429 只是"没抽中"，必须固定短延迟重试——指数退避会砍掉抽签次数。
+
+    实测依据：某次真实抢票里，指数退避让第一分钟只有 25 次尝试（250ms 理论值 240 次）。
+    """
+
+    assert 250 <= DEFAULT_RATE_LIMIT_DELAY_MS <= 350
 
 
 def test_exception_backoff_is_capped():
@@ -78,11 +79,13 @@ def test_extract_errno(payload, expected):
     assert extract_errno(payload) == expected
 
 
-def test_rate_limit_codes():
+def test_shield_codes_are_not_backoff_signals():
+    """900001/900002/221/3 是「1 秒盾」的正常结果，不该触发退避。"""
+
     for code in (3, 221, 900001, 900002):
-        assert ErrorCodes.is_rate_limit(code)
+        assert ErrorCodes.is_shield(code)
     for code in (0, 100009, 100048, 100051):
-        assert not ErrorCodes.is_rate_limit(code)
+        assert not ErrorCodes.is_shield(code)
 
 
 class _FakeBackoff:
