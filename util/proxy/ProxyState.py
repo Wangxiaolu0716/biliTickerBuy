@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
+import os
+import random
 import time
 from typing import Callable
 
@@ -38,7 +40,6 @@ class ProxyStateRegistry:
         self.failure_threshold = max(1, int(failure_threshold))
         self.failure_window_seconds = max(1.0, float(failure_window_seconds))
         self.cooldown_seconds = max(1.0, float(cooldown_seconds))
-        self.current_index = 0
         self.states = [
             ProxyStateEntry(
                 raw_proxy=proxy,
@@ -46,6 +47,23 @@ class ProxyStateRegistry:
             )
             for proxy in proxy_list
         ]
+        # 起始线路随机：多个任务（各自一个进程）共用同一份代理列表时，
+        # 如果都从 index 0 开始，T0 会把同一个 IP 瞬间打爆（立刻 412）。
+        # 单线路时无影响；BTB_PROXY_RANDOM_START=0 可关掉。
+        self.current_index = self._pick_initial_index(len(self.states))
+
+    @staticmethod
+    def _pick_initial_index(size: int) -> int:
+        if size <= 1:
+            return 0
+        if str(os.environ.get("BTB_PROXY_RANDOM_START", "1")).strip().lower() in {
+            "0",
+            "false",
+            "off",
+            "no",
+        }:
+            return 0
+        return random.randrange(size)
 
     def set_current_index(self, index: int) -> None:
         if index < 0 or index >= len(self.states):

@@ -272,3 +272,19 @@ def test_risk_control_multi_line_never_waits():
             risk_streak=streak,
         )
         assert delay is None
+
+
+def test_proxy_registry_randomizes_initial_index_for_multi_proxy(monkeypatch):
+    from util.proxy.ProxyState import ProxyStateRegistry
+
+    proxy_list = [f"http://127.0.0.1:{8000 + i}" for i in range(8)]
+    starts = {
+        ProxyStateRegistry(proxy_list, mask_proxy=str).current_index for _ in range(40)
+    }
+    # 多线路时起始 index 不应固定为 0（否则多任务会把同一条代理打爆）
+    assert any(index != 0 for index in starts)
+
+    monkeypatch.setenv("BTB_PROXY_RANDOM_START", "0")
+    assert ProxyStateRegistry(proxy_list, mask_proxy=str).current_index == 0
+    # 单线路永远是 0
+    assert ProxyStateRegistry(["none"], mask_proxy=str).current_index == 0
