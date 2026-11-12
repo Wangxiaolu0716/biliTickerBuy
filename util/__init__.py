@@ -41,6 +41,12 @@ EXE_PATH: str = get_exec_path()  # 应用目录
 
 
 def get_application_tmp_path() -> str:
+    # 多实例（多端口）时可用 BTB_TMP_DIR 给每个实例独立的 gradio 临时目录，
+    # 避免上传的配置文件 / 二维码图片互相覆盖；不设置时行为与上游一致。
+    override = os.environ.get("BTB_TMP_DIR")
+    if override:
+        os.makedirs(override, exist_ok=True)
+        return override
     os.makedirs(os.path.join(EXE_PATH, "tmp"), exist_ok=True)
     return os.path.join(EXE_PATH, "tmp")
 
