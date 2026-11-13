@@ -404,7 +404,14 @@ class _SourcePoolJA3H2Client(AbstractH2Client):
         source: SourceAddress,
         attempt: int,
     ) -> HealthcheckOutcome:
-        connection = self._build_connection(self._healthcheck_host, 443, source)
+        # 探活用短超时：坏出口不该让启动等满业务超时（原来 5s/条，21 个出口里 4 个超时
+        # 就拖了 17 秒，开票前 30 秒启动的实例会直接错过开售）。
+        connection = self._build_connection(
+            self._healthcheck_host,
+            443,
+            source,
+            timeout=H2CLIENT_HEALTHCHECK_TIMEOUT,
+        )
         try:
             response = connection.get(
                 self._healthcheck_url,
@@ -443,6 +450,8 @@ class _SourcePoolJA3H2Client(AbstractH2Client):
         host: str,
         port: int,
         source: SourceAddress,
+        *,
+        timeout: float | None = None,
     ) -> H2Connection:
         return self._connection_factory(
             host,
@@ -450,7 +459,7 @@ class _SourcePoolJA3H2Client(AbstractH2Client):
             port=port,
             sni=host,
             family=source.family,
-            timeout=self._timeout,
+            timeout=self._timeout if timeout is None else timeout,
             proxy_url=source.proxy_url,
             assert_ja=True,
         )
