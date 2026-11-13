@@ -151,3 +151,11 @@ class ProxyManager:
 
     def cool_down_current(self, reason: str, seconds: float | None = None) -> bool:
         return self.state_registry.cool_down_current(reason, seconds)
+
+    def record_rate_limit_round(
+        self, *, rounds_threshold: int, soft_cooldown_seconds: float
+    ) -> bool:
+        return self.state_registry.record_rate_limit_round(
+            rounds_threshold=rounds_threshold,
+            soft_cooldown_seconds=soft_cooldown_seconds,
+        )

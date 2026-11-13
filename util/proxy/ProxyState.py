@@ -17,6 +17,8 @@ class ProxyStateEntry:
     total_successes: int = 0
     last_reason: str = ""
     recent_failures: deque[float] = field(default_factory=deque)
+    # 连续多少"轮"（一次换线算一轮）在这条线路上被 429
+    rate_limit_rounds: int = 0
 
     def is_available(self, now: float | None = None) -> bool:
         current_time = time.time() if now is None else now
@@ -85,6 +87,7 @@ class ProxyStateRegistry:
         state = self.current_state()
         state.total_successes += 1
         state.recent_failures.clear()
+        state.rate_limit_rounds = 0
 
     def record_current_failure(self, reason: str) -> bool:
         now = time.time()
@@ -97,6 +100,31 @@ class ProxyStateRegistry:
             return False
         state.cooldown_until = max(state.cooldown_until, now + self.cooldown_seconds)
         state.recent_failures.clear()
+        return True
+
+    def record_rate_limit_round(
+        self,
+        *,
+        rounds_threshold: int,
+        soft_cooldown_seconds: float,
+    ) -> bool:
+        """给当前线路记一次"被 429 的一轮"；连续 N 轮都中招就软冷却它。
+
+        与 412 的冷却不同：这里是"这条 IP 当前一直在吃 429"的软性淘汰，
+        冷却时长较短且到点自动回到轮转（is_available 按 cooldown_until 判断）。
+        返回 True 表示这次触发了软冷却。
+        """
+
+        state = self.current_state()
+        state.rate_limit_rounds += 1
+        threshold = max(1, int(rounds_threshold))
+        if state.rate_limit_rounds < threshold:
+            return False
+        state.rate_limit_rounds = 0
+        now = time.time()
+        window = max(1.0, float(soft_cooldown_seconds))
+        state.cooldown_until = max(state.cooldown_until, now + window)
+        state.last_reason = f"连续 {threshold} 轮 429，软冷却 {int(window)}s"
         return True
 
     def cool_down_current(self, reason: str = "", seconds: float | None = None) -> bool:

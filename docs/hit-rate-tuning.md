@@ -102,11 +102,16 @@
 | 情况 | 行为 |
 | --- | --- |
 | 同一条 IP 连续 429 **且持续 ≥`RATE_LIMIT_ROTATE_MIN_SECONDS`(1.5s) 且 ≥`RATE_LIMIT_ROTATE_MIN_COUNT`(3) 次** | 切到下一条出口（不冷却、不计失败） |
+| 同一条 IP 连续 `RATE_LIMIT_SOFT_COOLDOWN_ROUNDS`(3) **轮**都被 429 | 软冷却 `RATE_LIMIT_SOFT_COOLDOWN_SECONDS`(90s)，把它踢出轮转；**到期自动回到轮转**（不是拉黑） |
 | 池子轮过一圈（换满 `可用出口数` 次）仍然全是 429 | 认为整池被限速，暂停 `RATE_LIMIT_ALL_EXHAUSTED_SLEEP_SECONDS`(1.5s) 再继续，避免把所有 IP 一起打进更重的限速 |
+| 没有可换的出口（都在冷却/软冷却） | 同样暂停 1.5s 再试 |
 | 收到正常业务响应 | 计数与轮转计数清零 |
 
 为什么不能"1 次就换"：429 是概率性放行，不是"IP 被拉黑"（那是 412）。
 实测成功样本是**同一 IP 连续 5 次 429 后第 6 发命中**（≈2.2 秒），阈值太低会直接打断这条路径。
+
+软冷却用的是同一个 `cooldown_until` 时间戳，所以**到期会自动回到轮转**，不需要手动恢复；
+收到正常响应时该出口的"连续 429 轮数"也会清零。
 
 换出口是**环形轮转**：`switch_to_next_available()` 用 `(current + offset) % len(states)`，
 所以把分配到的 IP 用完会回到第一条继续；处于冷却（412/连接失败）的条目会被自动跳过；
@@ -183,6 +188,8 @@ N 个任务同时开跑会把**同一条 IP** 瞬间打爆。
 | `RATE_LIMIT_ROTATE_MIN_SECONDS` | `util/Constant.py` | 1.5 | 连续 429 持续多久才换出口 |
 | `RATE_LIMIT_ROTATE_MIN_COUNT` | `util/Constant.py` | 3 | 换出口所需的最少连续 429 次数 |
 | `RATE_LIMIT_ALL_EXHAUSTED_SLEEP_SECONDS` | `util/Constant.py` | 1.5 | 整池都被 429 时的暂停秒数 |
+| `RATE_LIMIT_SOFT_COOLDOWN_ROUNDS` | `util/Constant.py` | 3 | 连续几轮 429 就软冷却该出口 |
+| `RATE_LIMIT_SOFT_COOLDOWN_SECONDS` | `util/Constant.py` | 90 | 软冷却时长（到点自动回到轮转） |
 
 界面原有参数语义不变，照常可调：`--interval`（每次失败后的间隔）、
 `--create-retry-limit`、`--create-request-batch-size`（现在不影响请求节奏）、

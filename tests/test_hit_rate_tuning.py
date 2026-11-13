@@ -20,6 +20,8 @@ from util.Constant import (
     DEFAULT_RATE_LIMIT_DELAY_MS,
     RATE_LIMIT_ROTATE_MIN_COUNT,
     RATE_LIMIT_ROTATE_MIN_SECONDS,
+    RATE_LIMIT_SOFT_COOLDOWN_ROUNDS,
+    RATE_LIMIT_SOFT_COOLDOWN_SECONDS,
     RISK_CONTROL_BACKOFF_BASE_SECONDS,
     RISK_CONTROL_BACKOFF_MAX_SECONDS,
     RISK_CONTROL_PROXY_COOLDOWN_MIN_SECONDS,
@@ -291,3 +293,58 @@ def test_proxy_rotation_wraps_around_and_skips_cooling():
     reg.set_current_index(0)
     assert reg.switch_to_next_available() is True
     assert reg.current_index == 2
+
+
+def test_rate_limit_soft_cooldown_and_auto_return():
+    """连续 N 轮都被 429 的出口会被软冷却；冷却到期后自动回到轮转。"""
+
+    import time as _time
+
+    from util.proxy.ProxyState import ProxyStateRegistry
+
+    reg = ProxyStateRegistry(
+        ["http://p1", "http://p2"], mask_proxy=str, cooldown_seconds=600
+    )
+    reg.set_current_index(0)
+
+    # 前 N-1 轮不冷却
+    for _ in range(RATE_LIMIT_SOFT_COOLDOWN_ROUNDS - 1):
+        assert (
+            reg.record_rate_limit_round(
+                rounds_threshold=RATE_LIMIT_SOFT_COOLDOWN_ROUNDS,
+                soft_cooldown_seconds=RATE_LIMIT_SOFT_COOLDOWN_SECONDS,
+            )
+            is False
+        )
+    assert reg.states[0].is_available() is True
+
+    # 第 N 轮触发软冷却
+    assert (
+        reg.record_rate_limit_round(
+            rounds_threshold=RATE_LIMIT_SOFT_COOLDOWN_ROUNDS,
+            soft_cooldown_seconds=RATE_LIMIT_SOFT_COOLDOWN_SECONDS,
+        )
+        is True
+    )
+    assert reg.states[0].is_available() is False
+    assert "软冷却" in reg.states[0].last_reason
+
+    # 冷却期内换线会跳过它
+    assert reg.switch_to_next_available() is True
+    assert reg.current_index == 1
+
+    # 时间到 → 自动回到轮转（不是永久拉黑）
+    reg.states[0].cooldown_until = _time.time() - 1
+    assert reg.states[0].is_available() is True
+    assert reg.available_count() == 2
+
+
+def test_rate_limit_round_resets_on_success():
+    from util.proxy.ProxyState import ProxyStateRegistry
+
+    reg = ProxyStateRegistry(["http://p1"], mask_proxy=str)
+    reg.set_current_index(0)
+    reg.record_rate_limit_round(rounds_threshold=3, soft_cooldown_seconds=90)
+    assert reg.states[0].rate_limit_rounds == 1
+    reg.record_current_success()
+    assert reg.states[0].rate_limit_rounds == 0

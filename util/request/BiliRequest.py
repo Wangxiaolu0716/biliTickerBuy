@@ -151,6 +151,16 @@ class BiliRequest:
     def mark_current_proxy_success(self) -> None:
         self.proxy_manager.mark_current_success()
 
+    def mark_proxy_rate_limited(
+        self, *, rounds_threshold: int, soft_cooldown_seconds: float
+    ) -> bool:
+        """当前线路记一次"被 429 的一轮"；连续 N 轮都中招则软冷却一段时间。"""
+
+        return self.proxy_manager.record_rate_limit_round(
+            rounds_threshold=rounds_threshold,
+            soft_cooldown_seconds=soft_cooldown_seconds,
+        )
+
     def cool_down_current_proxy(
         self, reason: str, seconds: float | None = None
     ) -> bool:

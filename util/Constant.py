@@ -71,6 +71,11 @@ RATE_LIMIT_ROTATE_MIN_COUNT = 3
 # 避免在 250ms 节奏下把所有出口一起打进更重的限速等级。
 RATE_LIMIT_ALL_EXHAUSTED_SLEEP_SECONDS = 1.5
 
+# 同一条 IP 连续这么多"轮"都被 429 → 软冷却一段时间，把它从轮转里踢出去，
+# 免得它每一轮都白占一个 1.5 秒窗口。冷却结束后它会自动回到轮转（按 cooldown_until 判定）。
+RATE_LIMIT_SOFT_COOLDOWN_ROUNDS = 3
+RATE_LIMIT_SOFT_COOLDOWN_SECONDS = 90
+
 # 注：HTTP 429 的重试间隔用 config.rate_limit_delay_ms（默认 DEFAULT_RATE_LIMIT_DELAY_MS=300ms）。
 # 依据 issues#963 + discussions#390：429 应"等 333ms 继续"，**不能指数退避**
 # —— 429 只是没抽中，退避会直接减少有效请求次数（实测指数退避让每分钟尝试从 240 掉到 25）。

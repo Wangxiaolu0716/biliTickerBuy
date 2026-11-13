@@ -33,6 +33,8 @@ from util.Constant import (
     RATE_LIMIT_ALL_EXHAUSTED_SLEEP_SECONDS,
     RATE_LIMIT_ROTATE_MIN_COUNT,
     RATE_LIMIT_ROTATE_MIN_SECONDS,
+    RATE_LIMIT_SOFT_COOLDOWN_ROUNDS,
+    RATE_LIMIT_SOFT_COOLDOWN_SECONDS,
 )
 from util.h2client.constants import H2CLIENT_CONNECTIONS_PER_SOURCE_IP
 from task.buy_helpers import (
@@ -828,42 +830,73 @@ def buy_stream(config: BuyConfig):
                         now_perf = time.perf_counter()
                         if rate_limit_since is None:
                             rate_limit_since = now_perf
-                        rotate = (
+                        rotate_due = (
                             rate_limit_streak >= RATE_LIMIT_ROTATE_MIN_COUNT
                             and (now_perf - rate_limit_since)
                             >= RATE_LIMIT_ROTATE_MIN_SECONDS
                             and config.create_request_proxy_strategy
                             != LOCAL_FANOUT_PROXY_STRATEGY
-                            and _request.available_proxy_count() > 1
                         )
-                        if rotate and _request.switch_proxy():
+                        if rotate_due:
+                            # 先给"正在被 429 的这条线"记一轮：连续 N 轮都被 429 就软冷却它
+                            # （免得差 IP 每轮都白占一个换线窗口）。冷却到点会自动回到轮转。
+                            soft_cooled = _request.mark_proxy_rate_limited(
+                                rounds_threshold=RATE_LIMIT_SOFT_COOLDOWN_ROUNDS,
+                                soft_cooldown_seconds=RATE_LIMIT_SOFT_COOLDOWN_SECONDS,
+                            )
                             rate_limit_streak = 0
                             rate_limit_since = None
-                            rate_limit_rotations += 1
-                            if rate_limit_rotations >= _request.available_proxy_count():
-                                # 整池轮了一圈仍然全是 429：整体都被 CDN 限速，硬打只会更糟
+                            if _request.switch_proxy():
+                                rate_limit_rotations += 1
+                                if (
+                                    rate_limit_rotations
+                                    >= _request.available_proxy_count()
+                                ):
+                                    # 整池轮了一圈仍然全是 429：整体都被 CDN 限速，硬打更糟
+                                    rate_limit_rotations = 0
+                                    yield emit(
+                                        "proxy",
+                                        f"整池 {_request.available_proxy_count()} 条出口"
+                                        f"都被 429 限速，暂停 "
+                                        f"{RATE_LIMIT_ALL_EXHAUSTED_SLEEP_SECONDS}s 后继续",
+                                        BuyStreamUpdate(
+                                            current_proxy=_request.current_proxy_status(),
+                                            proxy_pool=_request.proxy_pool_status(),
+                                        ),
+                                    )
+                                    time.sleep(RATE_LIMIT_ALL_EXHAUSTED_SLEEP_SECONDS)
+                                else:
+                                    cooled_note = (
+                                        f"（上一条出口连续 "
+                                        f"{RATE_LIMIT_SOFT_COOLDOWN_ROUNDS} 轮 429，软冷却 "
+                                        f"{RATE_LIMIT_SOFT_COOLDOWN_SECONDS}s）"
+                                        if soft_cooled
+                                        else ""
+                                    )
+                                    yield emit(
+                                        "proxy",
+                                        f"连续 {RATE_LIMIT_ROTATE_MIN_COUNT}+ 次 429 持续 "
+                                        f"{RATE_LIMIT_ROTATE_MIN_SECONDS}s，已切换出口到 "
+                                        f"{_request.current_proxy_display()}{cooled_note}",
+                                        BuyStreamUpdate(
+                                            current_proxy=_request.current_proxy_status(),
+                                            proxy_pool=_request.proxy_pool_status(),
+                                        ),
+                                    )
+                            else:
+                                # 没有别的出口可用（都在冷却/软冷却里）→ 整池限速，喘一口
                                 rate_limit_rotations = 0
                                 yield emit(
                                     "proxy",
-                                    f"整池 {_request.available_proxy_count()} 条出口都被 429 限速，"
-                                    f"暂停 {RATE_LIMIT_ALL_EXHAUSTED_SLEEP_SECONDS}s 后继续",
+                                    f"没有可用出口（剩余 "
+                                    f"{_request.available_proxy_count()} 条），暂停 "
+                                    f"{RATE_LIMIT_ALL_EXHAUSTED_SLEEP_SECONDS}s 后继续",
                                     BuyStreamUpdate(
                                         current_proxy=_request.current_proxy_status(),
                                         proxy_pool=_request.proxy_pool_status(),
                                     ),
                                 )
                                 time.sleep(RATE_LIMIT_ALL_EXHAUSTED_SLEEP_SECONDS)
-                            else:
-                                yield emit(
-                                    "proxy",
-                                    f"连续 {RATE_LIMIT_ROTATE_MIN_COUNT}+ 次 429 持续 "
-                                    f"{RATE_LIMIT_ROTATE_MIN_SECONDS}s，已切换出口到 "
-                                    f"{_request.current_proxy_display()}",
-                                    BuyStreamUpdate(
-                                        current_proxy=_request.current_proxy_status(),
-                                        proxy_pool=_request.proxy_pool_status(),
-                                    ),
-                                )
                         yield emit(
                             "attempt",
                             (
