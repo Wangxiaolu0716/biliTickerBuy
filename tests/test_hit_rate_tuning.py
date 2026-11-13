@@ -18,6 +18,7 @@ from task.buy_helpers import (
 )
 from util.Constant import (
     DEFAULT_RATE_LIMIT_DELAY_MS,
+    RATE_LIMIT_ROTATE_THRESHOLD,
     RISK_CONTROL_BACKOFF_BASE_SECONDS,
     RISK_CONTROL_BACKOFF_MAX_SECONDS,
     RISK_CONTROL_PROXY_COOLDOWN_MIN_SECONDS,
@@ -249,3 +250,9 @@ def test_risk_control_multi_line_never_waits():
             risk_streak=streak,
         )
         assert delay is None
+
+
+def test_rate_limit_rotate_threshold_is_sane():
+    """连续 429 换出口的阈值：太小会抖动、太大等于不换（实测单 IP 曾连续 1374 次 429）。"""
+
+    assert 3 <= RATE_LIMIT_ROTATE_THRESHOLD <= 20

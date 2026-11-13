@@ -58,6 +58,12 @@ RISK_CONTROL_PROXY_COOLDOWN_MIN_SECONDS = 600
 # 原逻辑在这种情况下会走 ProxyBackoff 的 30/60/120/240s，开票窗口里等于出局。
 SINGLE_LINE_MAX_BACKOFF_SECONDS = 3
 
+# 连续多少次 429 就主动换一个出口。
+# 429 是 CDN 层对该 **IP** 的限速（与你用哪个账号无关），一直死磕同一条 IP 会一直被挡；
+# 实测：某场单 IP 连续 1374 次 429（21 分钟）而池子里另外 20 条全程闲置。
+# 6 次 ≈ 2 秒（每次 429 后等 300ms），够判断这条 IP 当前不可用。
+RATE_LIMIT_ROTATE_THRESHOLD = 6
+
 # 注：HTTP 429 的重试间隔用 config.rate_limit_delay_ms（默认 DEFAULT_RATE_LIMIT_DELAY_MS=300ms）。
 # 依据 issues#963 + discussions#390：429 应"等 333ms 继续"，**不能指数退避**
 # —— 429 只是没抽中，退避会直接减少有效请求次数（实测指数退避让每分钟尝试从 240 掉到 25）。
