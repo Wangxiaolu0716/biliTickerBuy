@@ -294,7 +294,12 @@ def wait_until_start(
                     "countdown_seconds": countdown_seconds,
                 }
             next_report_at = next_countdown_report_at(countdown_seconds)
-        time.sleep(min(0.5, remaining))
+        # 最后一秒用细粒度睡眠：原来固定最多睡 0.5s，意味着倒计时"发现开售"最坏会晚 0.5 秒，
+        # 等于把首发白送出去（实测成功那场是靠运气正好对齐）。1 秒外仍按 0.5s 粗睡。
+        if remaining > 1.0:
+            time.sleep(min(0.5, remaining - 1.0))
+        else:
+            time.sleep(min(0.02, max(0.001, remaining)))
 
 
 def build_token_payload(tickets_info: dict) -> dict:
