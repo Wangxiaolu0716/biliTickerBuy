@@ -29,7 +29,11 @@ from util.proxy.ProxyManager import ProxyManager
 from util.notifer.RandomMessages import get_random_fail_message
 from util import time_service
 from util.ErrorCodes import ErrorCodes
-from util.Constant import RATE_LIMIT_ROTATE_THRESHOLD
+from util.Constant import (
+    RATE_LIMIT_ALL_EXHAUSTED_SLEEP_SECONDS,
+    RATE_LIMIT_ROTATE_MIN_COUNT,
+    RATE_LIMIT_ROTATE_MIN_SECONDS,
+)
 from util.h2client.constants import H2CLIENT_CONNECTIONS_PER_SOURCE_IP
 from task.buy_helpers import (
     BASE_URL as base_url,
@@ -514,8 +518,10 @@ def buy_stream(config: BuyConfig):
     proxy_backoff = ProxyBackoff(max_seconds=config.proxy_backoff_max_seconds)
     # 连续 412 次数：单线路时决定"快速重试"还是"指数退避 + 提示换网络/换账号"。
     risk_streak = 0
-    # 连续 429 次数：达到阈值就换出口（429 是 IP 级限速，死磕一条 IP 会一直被挡）
+    # 429 换出口状态：连续次数 / 起始时刻 / 本轮已换了几次出口
     rate_limit_streak = 0
+    rate_limit_since: float | None = None
+    rate_limit_rotations = 0
     is_hot_project = bool(tickets_info.get("is_hot_project", False))
     # use_local_token = bool(config.use_local_token)
     browser_window_state = generate_browser_window_state()
@@ -750,6 +756,8 @@ def buy_stream(config: BuyConfig):
                         proxy_backoff.reset()
                         risk_streak = 0
                         rate_limit_streak = 0
+                        rate_limit_since = None
+                        rate_limit_rotations = 0
                         err = _extract_errno(ret)
                         retry_outcome.set_response(err, ret)
                         _request.handle_100001(err)
@@ -817,23 +825,45 @@ def buy_stream(config: BuyConfig):
                     except BiliRateLimitError as e:
                         retry_outcome.set_exception(e)
                         rate_limit_streak += 1
-                        if (
-                            rate_limit_streak >= RATE_LIMIT_ROTATE_THRESHOLD
+                        now_perf = time.perf_counter()
+                        if rate_limit_since is None:
+                            rate_limit_since = now_perf
+                        rotate = (
+                            rate_limit_streak >= RATE_LIMIT_ROTATE_MIN_COUNT
+                            and (now_perf - rate_limit_since)
+                            >= RATE_LIMIT_ROTATE_MIN_SECONDS
                             and config.create_request_proxy_strategy
                             != LOCAL_FANOUT_PROXY_STRATEGY
                             and _request.available_proxy_count() > 1
-                            and _request.switch_proxy()
-                        ):
+                        )
+                        if rotate and _request.switch_proxy():
                             rate_limit_streak = 0
-                            yield emit(
-                                "proxy",
-                                f"连续 {RATE_LIMIT_ROTATE_THRESHOLD} 次 429，"
-                                f"已切换出口到 {_request.current_proxy_display()}",
-                                BuyStreamUpdate(
-                                    current_proxy=_request.current_proxy_status(),
-                                    proxy_pool=_request.proxy_pool_status(),
-                                ),
-                            )
+                            rate_limit_since = None
+                            rate_limit_rotations += 1
+                            if rate_limit_rotations >= _request.available_proxy_count():
+                                # 整池轮了一圈仍然全是 429：整体都被 CDN 限速，硬打只会更糟
+                                rate_limit_rotations = 0
+                                yield emit(
+                                    "proxy",
+                                    f"整池 {_request.available_proxy_count()} 条出口都被 429 限速，"
+                                    f"暂停 {RATE_LIMIT_ALL_EXHAUSTED_SLEEP_SECONDS}s 后继续",
+                                    BuyStreamUpdate(
+                                        current_proxy=_request.current_proxy_status(),
+                                        proxy_pool=_request.proxy_pool_status(),
+                                    ),
+                                )
+                                time.sleep(RATE_LIMIT_ALL_EXHAUSTED_SLEEP_SECONDS)
+                            else:
+                                yield emit(
+                                    "proxy",
+                                    f"连续 {RATE_LIMIT_ROTATE_MIN_COUNT}+ 次 429 持续 "
+                                    f"{RATE_LIMIT_ROTATE_MIN_SECONDS}s，已切换出口到 "
+                                    f"{_request.current_proxy_display()}",
+                                    BuyStreamUpdate(
+                                        current_proxy=_request.current_proxy_status(),
+                                        proxy_pool=_request.proxy_pool_status(),
+                                    ),
+                                )
                         yield emit(
                             "attempt",
                             (

@@ -18,7 +18,8 @@ from task.buy_helpers import (
 )
 from util.Constant import (
     DEFAULT_RATE_LIMIT_DELAY_MS,
-    RATE_LIMIT_ROTATE_THRESHOLD,
+    RATE_LIMIT_ROTATE_MIN_COUNT,
+    RATE_LIMIT_ROTATE_MIN_SECONDS,
     RISK_CONTROL_BACKOFF_BASE_SECONDS,
     RISK_CONTROL_BACKOFF_MAX_SECONDS,
     RISK_CONTROL_PROXY_COOLDOWN_MIN_SECONDS,
@@ -252,7 +253,41 @@ def test_risk_control_multi_line_never_waits():
         assert delay is None
 
 
-def test_rate_limit_rotate_threshold_is_sane():
-    """连续 429 换出口的阈值：太小会抖动、太大等于不换（实测单 IP 曾连续 1374 次 429）。"""
+def test_rate_limit_rotate_window_is_sane():
+    """429 换出口用时间窗：太短会打断"同一 IP 连续 429 后命中"的成功路径，太长等于不换。
 
-    assert 3 <= RATE_LIMIT_ROTATE_THRESHOLD <= 20
+    实测锚点：成功样本是同一 IP 连续 5 次 429 后第 6 发命中（≈2.2s），
+    所以时间窗必须留出这段窗口，同时不能超过几秒。
+    """
+
+    assert 0.8 <= RATE_LIMIT_ROTATE_MIN_SECONDS <= 3.0
+    assert 2 <= RATE_LIMIT_ROTATE_MIN_COUNT <= 10
+
+
+def test_proxy_rotation_wraps_around_and_skips_cooling():
+    """换出口是环形轮转：用完最后一条会跳回第一条；处于冷却的会被跳过。"""
+
+    import time as _time
+
+    from util.proxy.ProxyState import ProxyStateRegistry
+
+    reg = ProxyStateRegistry(
+        ["http://p1", "http://p2", "http://p3"], mask_proxy=str, cooldown_seconds=600
+    )
+    # 起始索引随机，先固定到 0 便于断言
+    reg.set_current_index(0)
+    seen = [reg.current_index]
+    for _ in range(2):
+        assert reg.switch_to_next_available() is True
+        seen.append(reg.current_index)
+    assert seen == [0, 1, 2]
+
+    # 用完最后一条后跳回第一条（环形）
+    assert reg.switch_to_next_available() is True
+    assert reg.current_index == 0
+
+    # p2 进入冷却后应被跳过
+    reg.states[1].cooldown_until = _time.time() + 600
+    reg.set_current_index(0)
+    assert reg.switch_to_next_available() is True
+    assert reg.current_index == 2

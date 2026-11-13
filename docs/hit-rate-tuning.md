@@ -91,16 +91,26 @@
 
 ---
 
-### 2.6 连续 429 自动换出口（本分支新增）
+### 2.6 429 连续超时自动换出口 + 整池限速时暂停（本分支新增）
 
 429 是 **CDN 对该 IP** 的限速，与账号无关。上游的做法是"等 `rate_limit_delay_ms` 继续打同一条 IP"——
 实测 2026-11-13 那场：某任务单 IP 连续吃到 **1374 次 429**（21 分钟），而它池子里另外 20 条代理
-**全程 `可用 21/21、冷却 0`，一次都没被用过**；另一个任务 18 次尝试 **100% 429** 也没换线，
-而那次只要早两秒换 IP 大概率就进去了。
+**全程 `可用 21/21、冷却 0`，一次都没被用过**；另一个任务 18 次尝试 **100% 429** 也没换线。
 
-现在：连续 `RATE_LIMIT_ROTATE_THRESHOLD = 6` 次 429（≈2 秒）就切到下一条出口（不冷却、不计失败），
-日志里会打 `连续 6 次 429，已切换出口到 ...`。收到正常响应即清零。
-代理池并发模式下不切（它本来就同时用整池）。
+规则（不用固定次数，因为次数和 interval 挂钩）：
+
+| 情况 | 行为 |
+| --- | --- |
+| 同一条 IP 连续 429 **且持续 ≥`RATE_LIMIT_ROTATE_MIN_SECONDS`(1.5s) 且 ≥`RATE_LIMIT_ROTATE_MIN_COUNT`(3) 次** | 切到下一条出口（不冷却、不计失败） |
+| 池子轮过一圈（换满 `可用出口数` 次）仍然全是 429 | 认为整池被限速，暂停 `RATE_LIMIT_ALL_EXHAUSTED_SLEEP_SECONDS`(1.5s) 再继续，避免把所有 IP 一起打进更重的限速 |
+| 收到正常业务响应 | 计数与轮转计数清零 |
+
+为什么不能"1 次就换"：429 是概率性放行，不是"IP 被拉黑"（那是 412）。
+实测成功样本是**同一 IP 连续 5 次 429 后第 6 发命中**（≈2.2 秒），阈值太低会直接打断这条路径。
+
+换出口是**环形轮转**：`switch_to_next_available()` 用 `(current + offset) % len(states)`，
+所以把分配到的 IP 用完会回到第一条继续；处于冷却（412/连接失败）的条目会被自动跳过；
+全部都在冷却时返回 False（不切换）。
 
 ## 3. 被限流后的恢复策略
 
@@ -170,7 +180,9 @@ N 个任务同时开跑会把**同一条 IP** 瞬间打爆。
 | `SINGLE_LINE_MAX_BACKOFF_SECONDS` | `util/Constant.py` | 3 | 单线路"线路级"失败的最长退避 |
 | `DEFAULT_RATE_LIMIT_DELAY_MS` | `util/Constant.py` | 300 | HTTP 429 的固定重试间隔（别调大） |
 | `BTB_PROXY_RANDOM_START` | 环境变量 | 1 | `0` = 关闭"多线路随机选取起始代理" |
-| `RATE_LIMIT_ROTATE_THRESHOLD` | `util/Constant.py` | 6 | 连续多少次 429 就换出口 |
+| `RATE_LIMIT_ROTATE_MIN_SECONDS` | `util/Constant.py` | 1.5 | 连续 429 持续多久才换出口 |
+| `RATE_LIMIT_ROTATE_MIN_COUNT` | `util/Constant.py` | 3 | 换出口所需的最少连续 429 次数 |
+| `RATE_LIMIT_ALL_EXHAUSTED_SLEEP_SECONDS` | `util/Constant.py` | 1.5 | 整池都被 429 时的暂停秒数 |
 
 界面原有参数语义不变，照常可调：`--interval`（每次失败后的间隔）、
 `--create-retry-limit`、`--create-request-batch-size`（现在不影响请求节奏）、
